@@ -96,3 +96,13 @@ def test_download_image_writes_under_images_dir(repo: CardRepository, tmp_path: 
     downloaded = repo.download_image(card)
     assert downloaded.image_path == tmp_path / "images" / "jp" / "SV1V_1.png"
     assert downloaded.image_path.exists()
+
+
+def test_same_illustrator_ignores_case_and_spacing() -> None:
+    from ptcgl.data.cards import same_illustrator
+
+    assert same_illustrator("Ryuta Fuse", "ryuta fuse")
+    assert same_illustrator("aky CG Works", "AKY_CG-Works")
+    assert not same_illustrator("Ryuta Fuse", "GOSSAN")
+    assert not same_illustrator(None, "GOSSAN")
+    assert not same_illustrator("", "")

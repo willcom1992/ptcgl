@@ -69,6 +69,7 @@ class Anchor:
     number_prefix: str = ""  # Trainer Gallery 等の接頭辞（"TG05/TG30" の "TG"）
     text_lines: list[str] = field(default_factory=list)
     confidence: float = 0.0
+    line: OcrLine | None = None  # アンカーの元になった行（番号行または HP バッジ）
 
 
 def to_geoms(lines: list[OcrLine], width: float, height: float) -> list[LineGeom]:
@@ -147,6 +148,7 @@ def find_number_anchor(geoms: list[LineGeom], frame_aspect: float) -> Anchor | N
         total=total,
         number_prefix=prefix,
         confidence=g.line.confidence,
+        line=g.line,
     )
 
 
@@ -192,6 +194,7 @@ def find_hp_badge_anchor(geoms: list[LineGeom], frame_aspect: float) -> Anchor |
         hp=int(hp_g.text.strip()),
         text_lines=column,
         confidence=min(hp_g.line.confidence, name_g.line.confidence),
+        line=hp_g.line,
     )
 
 

@@ -79,6 +79,12 @@ def _normalize_artist(name: str | None) -> str:
     return re.sub(r"[\s_\-.]", "", (name or "").lower())
 
 
+def same_illustrator(a: str | None, b: str | None) -> bool:
+    """イラストレーター名が一致するか（空白・記号・大文字小文字を無視）。どちらかが空なら False。"""
+    na, nb = _normalize_artist(a), _normalize_artist(b)
+    return bool(na) and na == nb
+
+
 def rank_candidates(entries: tuple[PrintEntry, ...]) -> list[PrintEntry]:
     """照合の優先順: 通常拡張パック → その他、同一枠内は番号の小さい順。"""
 

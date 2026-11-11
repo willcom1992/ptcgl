@@ -29,16 +29,18 @@
 | `capture/window.py` | ウィンドウ列挙、DWM 拡張フレーム矩形、ウィンドウ DPI、DPI 対応宣言 | `list_windows()`, `find_window()`, `ensure_dpi_aware()` |
 | `capture/screen.py` | 指定矩形のキャプチャ（物理 px）、モニター構成のフィンガープリント | `ScreenCapture.grab()`, `monitor_fingerprint()` |
 | `recognition/detector.py` | カード領域検出（Protocol）。輪郭検出実装と手動領域実装 | `CardDetector`, `ContourCardDetector`, `ManualRegionDetector`, `CardBox` |
-| `recognition/ocr.py` | RapidOCR によるテキスト抽出 | `OcrEngine.read()` |
+| `recognition/ocr.py` | RapidOCR によるテキスト抽出。スレッド数は自動で 2〜4 に抑え、角度分類は使わない | `OcrEngine.read()`, `default_ocr_threads()` |
 | `recognition/card.py` | OCR 結果からカード名・番号・分母・HP を抽出 | `extract_card_info()`, `parse_number_total()` |
 | `data/sets.py` | PTCGL セットコードと番号の分母の表（`en_sets.json`） | `sets_by_official_total()`, `find_set()` |
 | `data/limitless.py` | Limitless カードページの HTML 解析 | `parse_card_page()`, `CardRef`, `CardPage` |
 | `data/cards.py` | 英→日の照合（同一イラスト優先、候補の順位付け） | `CardRepository.find_japanese()` |
 | `data/mapping.py` | 確定した対応付けの保存（SQLite） | `MappingStore` |
 | `data/cache.py` | HTTP 取得のディスクキャッシュ・間隔制御 | `CachedHttpClient` |
-| `pipeline.py` | 上記の接続。CLI/GUI から呼ぶ | `Pipeline.identify_frame()`, `identify_ref()` |
+| `pipeline.py` | 上記の接続。CLI/GUI から呼ぶ。常駐モード用の高速パスもここ | `Pipeline.identify_frame()`, `identify_fast()`, `identify_ref()` |
+| `watch.py` | 常駐モードの監視ロジック（Qt 非依存）。画面変化の判定と 1 ステップの実行 | `FrameWatcher`, `WatchSession.step()` |
+| `ui/worker.py` | ワーカースレッド。`WatchSession` を定期実行し結果をシグナルで通知 | `RecognitionWorker`, `WorkerThread` |
 | `config.py` | 設定の読み書き（JSON, platformdirs） | `AppConfig`, `load_config()`, `save_config()` |
-| `ui/main_window.py` | 画像表示・候補選択・最前面切替・位置の比率保存 | `MainWindow.show_match()` |
+| `ui/main_window.py` | 画像表示・候補選択・最前面切替・一時停止・位置の比率保存・キャプチャ除外 | `MainWindow.show_match()`, `show_result()` |
 
 ## PTCGL の拡大表示の種類（2026-11-11 のスクリーンショットで確認）
 | 表示 | 出る場面 | 読めるもの | 特定方法 |
@@ -61,9 +63,9 @@
 - 候補の優先順: 通常拡張パック（`SV1S`, `SV10`, `M2a` …）→ プロモ／構築済み、同枠内は番号順。
 - 順に日本語ページを取得し、イラストレーターが英語版と一致した最初の候補を「同一絵柄」として採用する。
 - 一致が無い場合は信頼度 0.5 で別イラスト候補を返し、UI では「別イラスト（要確認）」と表示する。
-  ユーザーが候補を選ぶと `CardRepository.confirm()` で `MappingStore` に `source="manual"` で保存され、
-  以後はそれを優先する（UI の `candidate_selected` シグナルと `confirm()` の接続は Phase 1 の
-  認識ワーカー実装時に行う。Phase 0 の GUI は CLI から渡された結果を表示するだけ）。
+  ユーザーが候補を選ぶと `MainWindow.confirm_requested` → `RecognitionWorker.confirm()` →
+  `CardRepository.confirm()` の経路で `MappingStore` に `source="manual"` で保存され、以後はそれを優先する。
+  保存はワーカースレッドで行い、UI スレッドで SQLite やネットワークに触れない。
 - 1 枚につき最大で候補数ぶんのページ取得が発生するが、すべてディスクキャッシュされる。
 
 ## 環境非依存のための決まり
@@ -74,17 +76,52 @@
 - モニター構成: `monitor_fingerprint()` を設定に保存し、変化したら `needs_reconfirm` を立てる。
 - 同梱リソース（`en_sets.json`, RapidOCR モデル）は `importlib.resources` / PyInstaller の datas。
 
-## スレッド構成
-- **UI スレッド**: Qt イベントループのみ
-- **RecognitionWorker (QThread)**（Phase 1）: キャプチャ・差分判定・検出・OCR・データ取得を
-  一つのループで実行し、結果を `card_recognized(MatchResult)` シグナルで UI へ通知する
+## 常駐モードの認識フロー（遅延を抑える仕組み）
+1. **変化領域の特定**（`watch.py`）: 幅 320 px の縮小グレースケールで基準フレームとの差分を取り、
+   変化した画素の外接矩形を「変化領域」とする。画面の 6 割以上が変わっていれば全画面扱い。
+2. **即時認識**: 画面が静止するのを待たず、変化を検知したティック（既定 250 ms 間隔）で認識する。
+3. **高速パス**（`Pipeline.identify_fast()`）: 変化領域に対して文字**検出**だけを行い（長辺 960 px に縮小）、
+   番号行らしい小さく横長の箱だけを**認識**する。候補は「下にある順」と「小さい順」の上位 6 個ずつを
+   合わせた 1 段目、残りの小さな箱 6 個の 2 段目。番号行が読めたらセットコードで英語カードを確定し、
+   セットコードが読めない・分母が衝突する場合だけ番号行と左端が揃う上の行（カード名）を追加で読む。
+   取りこぼしたら元解像度で検出し直す。傾いた箱（バトル場の詳細表示）は射影変換で起こしてから認識する。
+   長辺 900 px 未満の小さな領域は先に長辺 1100 px へ拡大する（画面幅の 2 割程度のカードは番号が 8 px しかなく、
+   検出が「056/」で途切れる）。全画面で番号行が読めない場合は、2〜3 桁の数字で終わる大きな箱（HP バッジ。
+   名前バーと結合していることもある）の右端からカード領域を推定し、大きい順に 2 つまで拡大して読み直す。
+4. **フォールバック**: 変化領域で見つからなければ全画面で高速パス、それでも駄目なら通常パイプライン
+   （全行認識。番号が隠れる対戦中の詳細表示は名前・HP・ワザ名の検索で特定）。
+5. **失敗時の扱い**: 動いている最中の失敗は基準フレームを更新せず、静止後に再度「変化」として拾う。
+   失敗が続けば試行間隔を 1, 2, 4 … ティック（上限 40）と倍々に延ばす。静止画面での失敗は基準にして
+   画面が変わるまで再試行しない。
+
+開発機（WQHD）の擬似計測: 番号が見える表示で 0.4〜1.3 秒（高速パスのみ）、取りこぼしで元解像度
+再検出が入ると 2 秒、対戦中の詳細表示は 7 秒（通常パイプラインまで落ちる）。
+常駐モードの動作ログは `user_data_dir/ptcgl.log`（`app.configure_file_logging()`、2 MB × 3 世代）。
+
+## スレッド構成（常駐モード）
+- **UI スレッド**: Qt イベントループと `MainWindow` のみ。
+- **RecognitionWorker**（`ui/worker.py`、`WorkerThread` 上で動く `QObject`）: `QTimer` で
+  `capture.interval_ms` ごとに `WatchSession.step()` を呼ぶ。`Pipeline`（OCR エンジン・HTTP・SQLite）は
+  このスレッドが所有し、UI からの依頼（候補の確定・一時停止）はキュー接続のスロットで受ける。
+  シグナル: `status_changed(str)`, `result_ready(IdentifyResult)`, `window_changed(WindowInfo | None)`。
+- **WatchSession / FrameWatcher**（`watch.py`、Qt 非依存）: 1 ステップで「ウィンドウ探索 → キャプチャ →
+  変化判定 → 認識」を行う。詳細は上の「常駐モードの認識フロー」。`change_threshold`（既定 4.0）は
+  基準フレームとの平均差分、`stable_threshold`（既定 1.5）は直前フレームとの平均差分の閾値。
+- ウィンドウは hwnd を保持して毎ステップ `IsWindow` / `IsIconic` / 矩形を確認し、消えたら再探索する。
+  再探索・ウィンドウ切替時は差分の履歴を捨てる。
+- 表示ウィンドウ自身は `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` でキャプチャから除外し、
+  PTCGL に重ねて置いても認識に写り込まない（`overlay.exclude_from_capture`）。
+- 結果の反映（`MainWindow.show_result()`）: 同じ英語カード・同じ日本語版が続けば表示を変えない。
+  カードが見つからないときは直前の表示を残し、状態行にだけ理由を出す（誤ったカードを出さない）。
 
 ## 設定（`config.py`）
 `%LOCALAPPDATA%\ptcgl\config.json`（platformdirs の `user_config_dir("ptcgl", appauthor=False)`）。
 `cache_dir` / `images_dir` / `db_path` は既定（`%LOCALAPPDATA%\ptcgl\` 配下）のままなら書き出さない。主な項目:
 - `target_window.title_pattern` / `process_name`
-- `capture.detection_mode`（`auto` | `manual`）, `capture.card_region_ratio`
-- `overlay.monitor_name`, `overlay.ratio_pos`, `overlay.ratio_size`, `overlay.always_on_top`
+- `capture.interval_ms`, `capture.detection_mode`（`auto` | `manual`）, `capture.card_region_ratio`,
+  `capture.change_threshold`, `capture.stable_threshold`
+- `overlay.monitor_name`, `overlay.ratio_pos`, `overlay.ratio_size`, `overlay.always_on_top`,
+  `overlay.exclude_from_capture`
 - `monitor_fingerprint`, `needs_reconfirm`
 - `cache_dir`, `images_dir`, `db_path`（既定は user_data_dir 配下）
 
@@ -98,6 +135,13 @@
 | 2026-11-11 | TCGdex は英語セット表（略号・分母）の生成にだけ使う | `/v2/en/sets/{id}` の `abbreviation` と `cardCount.official` が PTCGL の番号表記と一致する |
 | 2026-11-11 | 同一イラスト判定はイラストレーター名の一致 | Limitless のページに絵柄の同一性を示す情報が無い。別イラストは自動確定しない |
 | 2026-11-11 | 設定は JSON（TOML ではない） | 標準ライブラリに TOML の書き出しが無い |
+| 2026-11-11 | 常駐モードは画面変化の差分で OCR のタイミングを決める（固定周期で OCR しない） | 全画面 OCR は WQHD で 1 回 5〜12 秒かかり、毎秒実行すると対戦中の CPU を占有する。変化して静止した瞬間だけ認識すれば十分 |
+| 2026-11-11 | 監視ロジック（`watch.py`）を Qt から分離し、依存を呼び出し可能オブジェクトで注入する | Win32・画面キャプチャ無しで pytest できるようにするため |
+| 2026-11-11 | onnxruntime のスレッド数は自動で 2〜4 に抑え、角度分類（cls）は使わない | 既定の全論理コア（開発機 24）では 1 パス 2.5 秒、4〜8 スレッドで 0.5 秒。PTCGL が動いている負荷時は 4 が最も安定。画面の文字は回転しないので cls は不要 |
+| 2026-11-11 | パス 2 は領域の下帯（番号・セットコード）だけ先に OCR し、セットコードで確定できなければ全体を読む | ワザ説明文の行を読むのが pass 2 の大半のコスト。PTCGL のフルカード表示はセットコードが明瞭で、名前は分母が衝突したときだけ必要 |
+| 2026-11-11 | 常駐モードは変化領域に対する「検出 + 選択的認識」の高速パスを先に試す | 全行認識は 1 枚 1.5〜3 秒かかり、その大半はワザ説明文の認識。番号行だけ読めばセットコードで確定でき、0.5〜1 秒になる |
+| 2026-11-11 | 静止を待たずに変化検知の直後に認識する | 拡大表示は 1 フレームで出終わることが多く、静止待ちの 1 ティック分が丸ごと無駄だった。動いている最中の失敗は基準を更新しないことで静止後に拾える |
+| 2026-11-11 | 表示ウィンドウを `WDA_EXCLUDEFROMCAPTURE` でキャプチャから除外する | PTCGL をフルスクリーンにすると表示ウィンドウを重ねざるを得ず、写り込むと OCR が自分の表示を読んでしまう |
 | 2026-11-11 | 画像は個人利用・ローカルキャッシュのみ、再配布しない | pokemon-card.com の規約が複製・配布を禁止している |
 | 2026-11-11 | カード領域は画像処理ではなく OCR アンカー方式で推定する | 輪郭検出・勾配・彩度・色相の 4 方式を試したが、PTCGL の発光枠・丸角・盤面の模様でカード矩形を安定して取れなかった（13 枚中 2 枚）。番号行／HP バッジを手がかりにすると 13 枚中 11 枚で領域を得られた |
 | 2026-11-11 | 番号が隠れる対戦中の詳細表示は Limitless 検索（名前・HP・ワザ名）で特定する | `unique:cards` で同一テキストのカードに絞れる。返るのは代表印刷なので絵柄は未確認扱い |

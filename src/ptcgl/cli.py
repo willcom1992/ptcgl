@@ -24,6 +24,7 @@ def build_services(cfg: AppConfig):  # noqa: ANN201 - 戻り値は (Pipeline, Ca
     from ptcgl.data.mapping import MappingStore
     from ptcgl.pipeline import Pipeline
     from ptcgl.recognition.detector import ManualRegionDetector
+    from ptcgl.recognition.ocr import OcrEngine
 
     http = CachedHttpClient(cfg.cache_dir, min_interval=cfg.http_min_interval)
     repo = CardRepository(http, cfg.images_dir, MappingStore(cfg.db_path))
@@ -32,7 +33,8 @@ def build_services(cfg: AppConfig):  # noqa: ANN201 - 戻り値は (Pipeline, Ca
     detector = (
         ManualRegionDetector(manual) if cfg.capture.detection_mode == "manual" and manual else None
     )
-    return Pipeline(repo, detector=detector), http
+    ocr = OcrEngine(threads=cfg.ocr_threads or None)
+    return Pipeline(repo, ocr=ocr, detector=detector), http
 
 
 def _parse_region(text: str | None):  # noqa: ANN202

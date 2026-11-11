@@ -18,7 +18,7 @@ from ptcgl.recognition.detector import CardBox
 log = logging.getLogger(__name__)
 
 APP_NAME = "ptcgl"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: 常駐モードの確認間隔の既定を 1000ms → 250ms に変更
 
 
 def config_dir() -> Path:
@@ -53,8 +53,12 @@ class TargetWindowConfig:
 
 @dataclass
 class CaptureConfig:
-    interval_ms: int = 1000
+    interval_ms: int = 250  # 常駐モードで画面を確認する間隔
     detection_mode: str = "auto"  # "auto" | "manual"
+    # 画面変化の判定（縮小グレースケールの平均差分、0-255）。
+    # change_threshold 以上動いたら認識対象、stable_threshold 未満なら画面が静止したとみなす
+    change_threshold: float = 4.0
+    stable_threshold: float = 1.5
     # 対象ウィンドウのクライアント領域に対する比率 (rx, ry, rw, rh)。None なら自動検出
     card_region_ratio: tuple[float, float, float, float] | None = None
 
@@ -70,6 +74,7 @@ class OverlayConfig:
     ratio_pos: tuple[float, float] | None = None  # モニターに対する比率
     ratio_size: tuple[float, float] = (0.22, 0.6)
     always_on_top: bool = True
+    exclude_from_capture: bool = True  # 表示ウィンドウを画面キャプチャに写さない
 
 
 @dataclass
@@ -84,6 +89,7 @@ class AppConfig:
     images_dir: Path = field(default_factory=default_images_dir)
     db_path: Path = field(default_factory=default_db_path)
     http_min_interval: float = 1.0
+    ocr_threads: int = 0  # onnxruntime のスレッド数。0 なら自動（論理コアの半分、2〜4）
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -112,12 +118,19 @@ class AppConfig:
             process_name=tw.get("process_name", cfg.target_window.process_name),
         )
         cap = d.get("capture") or {}
+        version = int(d.get("schema_version", 1) or 1)
+        interval_ms = int(cap.get("interval_ms", cfg.capture.interval_ms))
+        if version < 2 and interval_ms == 1000:
+            # 旧版が既定値のまま書き出した 1000ms を、新しい既定値に引き上げる
+            interval_ms = cfg.capture.interval_ms
         region = cap.get("card_region_ratio")
         if region is not None and len(region) != 4:
             region = None
         cfg.capture = CaptureConfig(
-            interval_ms=int(cap.get("interval_ms", cfg.capture.interval_ms)),
+            interval_ms=interval_ms,
             detection_mode=cap.get("detection_mode", cfg.capture.detection_mode),
+            change_threshold=float(cap.get("change_threshold", cfg.capture.change_threshold)),
+            stable_threshold=float(cap.get("stable_threshold", cfg.capture.stable_threshold)),
             card_region_ratio=(
                 (float(region[0]), float(region[1]), float(region[2]), float(region[3]))
                 if region
@@ -132,6 +145,7 @@ class AppConfig:
             ratio_pos=(float(pos[0]), float(pos[1])) if pos else None,
             ratio_size=(float(size[0]), float(size[1])) if size else cfg.overlay.ratio_size,
             always_on_top=bool(ov.get("always_on_top", True)),
+            exclude_from_capture=bool(ov.get("exclude_from_capture", True)),
         )
         cfg.monitor_fingerprint = d.get("monitor_fingerprint")
         cfg.needs_reconfirm = bool(d.get("needs_reconfirm", False))
@@ -139,6 +153,7 @@ class AppConfig:
             if d.get(key):
                 setattr(cfg, key, Path(d[key]))
         cfg.http_min_interval = float(d.get("http_min_interval", cfg.http_min_interval))
+        cfg.ocr_threads = int(d.get("ocr_threads", cfg.ocr_threads))
         return cfg
 
     def check_monitor_change(self, current_fingerprint: str) -> bool:

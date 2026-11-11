@@ -4,7 +4,7 @@
 Pokémon TCG Live（PTCGL）の画面に表示されている **英語カード** を自動認識し、
 対応する **日本語版ポケモンカードの画像** を表示する Windows デスクトップアプリ。
 
-詳細な要件は [docs/spec.md](docs/spec.md)、設計は [docs/architecture.md](docs/architecture.md) を参照。
+詳細な要件は [docs/spec.md](docs/spec.md)、設計は [docs/architecture.md](docs/architecture.md)、使い方は [docs/usage.md](docs/usage.md) を参照。
 
 ## 技術スタック
 - Python 3.12（`.venv` は `py -3.12 -m venv .venv` で作成。コードは 3.10 互換の記法を保つ）
@@ -51,13 +51,14 @@ src/ptcgl/
   cli.py             # identify / windows / capture / config-path
   config.py          # 設定（JSON, platformdirs）。領域・位置はすべて比率で保存
   pipeline.py        # 検出 → OCR → 英語カード特定 → 日本語照合 の接続
+  watch.py           # 常駐モードの監視ロジック（画面変化の判定。Qt 非依存）
   capture/           # screen.py（mss, 物理px）・window.py（ウィンドウ列挙, DWM 矩形, DPI）
   imageio.py         # 非 ASCII パス対応の画像読み書き（cv2.imread は日本語パスを扱えない）
   recognition/       # anchor.py（OCR アンカーでカード領域推定）・ocr.py（RapidOCR）・card.py（OCR 文字列解析）
                      # detector.py（輪郭検出・手動領域。Protocol）
   data/              # limitless.py（HTML 解析）・cards.py（英→日照合）・mapping.py（SQLite）
                      # sets.py + en_sets.json（PTCGL セットコードと番号の分母）・cache.py
-  ui/                # PySide6 のウィジェット
+  ui/                # PySide6 のウィジェット（main_window.py）とワーカースレッド（worker.py）
 tests/               # pytest（fixtures/html に Limitless の保存ページ）
 scripts/             # build_en_sets.py, evaluate.py, detect_spike.py
 packaging/           # PyInstaller spec

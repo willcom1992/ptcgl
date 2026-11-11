@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ptcgl.config import AppConfig, load_config, save_config
+from ptcgl.config import SCHEMA_VERSION, AppConfig, load_config, save_config
 
 
 def test_config_roundtrip(tmp_path: Path) -> None:
@@ -22,7 +22,7 @@ def test_config_roundtrip(tmp_path: Path) -> None:
 
 
 def test_load_config_missing_or_broken_returns_defaults(tmp_path: Path) -> None:
-    assert load_config(tmp_path / "none.json").schema_version == 1
+    assert load_config(tmp_path / "none.json").schema_version == SCHEMA_VERSION
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
     assert load_config(broken).capture.detection_mode == "auto"
@@ -35,3 +35,16 @@ def test_monitor_change_sets_reconfirm_flag() -> None:
     assert cfg.check_monitor_change("xyz") is True
     assert cfg.needs_reconfirm is True
     assert cfg.monitor_fingerprint == "xyz"
+
+
+def test_old_config_default_interval_is_migrated(tmp_path) -> None:  # noqa: ANN001
+    """旧版（schema 1）が既定値のまま保存した 1000ms は新しい既定値に置き換え、他の値は保つ。"""
+    from ptcgl.config import AppConfig, load_config
+
+    p = tmp_path / "config.json"
+    p.write_text('{"schema_version": 1, "capture": {"interval_ms": 1000}}', encoding="utf-8")
+    assert load_config(p).capture.interval_ms == AppConfig().capture.interval_ms
+    p.write_text('{"schema_version": 1, "capture": {"interval_ms": 2000}}', encoding="utf-8")
+    assert load_config(p).capture.interval_ms == 2000
+    p.write_text('{"schema_version": 2, "capture": {"interval_ms": 1000}}', encoding="utf-8")
+    assert load_config(p).capture.interval_ms == 1000

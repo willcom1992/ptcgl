@@ -161,3 +161,46 @@ def find_ptcgl_window() -> tuple[int, int, int, int] | None:
     """PTCGL ウィンドウの矩形 (left, top, width, height) を返す。見つからなければ None。"""
     info = find_window(title_pattern=re.escape(PTCGL_WINDOW_TITLE), process_name=PTCGL_PROCESS_NAME)
     return info.client_rect if info else None
+
+
+def is_window_alive(hwnd: int) -> bool:
+    """ウィンドウハンドルがまだ有効で可視か。"""
+    if sys.platform != "win32":
+        return False
+    import win32gui
+
+    try:
+        return bool(win32gui.IsWindow(hwnd)) and bool(win32gui.IsWindowVisible(hwnd))
+    except Exception:
+        return False
+
+
+def is_window_minimized(hwnd: int) -> bool:
+    if sys.platform != "win32":
+        return False
+    import win32gui
+
+    try:
+        return bool(win32gui.IsIconic(hwnd))
+    except Exception:
+        return False
+
+
+_WDA_NONE = 0x0
+_WDA_EXCLUDEFROMCAPTURE = 0x11
+
+
+def set_exclude_from_capture(hwnd: int, enabled: bool = True) -> bool:
+    """自分のウィンドウを画面キャプチャから除外する（Windows 10 2004 以降）。
+
+    表示ウィンドウが PTCGL に重なっていても、キャプチャしたフレームに写り込まないようにする。
+    成功すれば True。非対応環境では False を返し、呼び出し側は重ならない配置に頼る。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        affinity = _WDA_EXCLUDEFROMCAPTURE if enabled else _WDA_NONE
+        ok = ctypes.windll.user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), affinity)
+        return bool(ok)
+    except (AttributeError, OSError):
+        return False

@@ -3,14 +3,24 @@
 - 画像はウィンドウサイズに追従して拡縮する
 - 候補が複数あるときは一覧から選択でき、選択結果は呼び出し側へシグナルで通知する
 - Ctrl+T で最前面表示を切り替える。位置・サイズはモニターに対する比率で設定に保存する
+- Ctrl+R で常駐モードの監視を一時停止・再開する
+- 自分自身を画面キャプチャから除外し、PTCGL に重ねて置いても認識の邪魔にならないようにする
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence, QMoveEvent, QPixmap, QResizeEvent, QShortcut
+from PySide6.QtGui import (
+    QKeySequence,
+    QMoveEvent,
+    QPixmap,
+    QResizeEvent,
+    QShortcut,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
@@ -22,17 +32,24 @@ from PySide6.QtWidgets import (
 
 from ptcgl.config import AppConfig
 
+if TYPE_CHECKING:
+    from ptcgl.capture.window import WindowInfo
+    from ptcgl.pipeline import IdentifyResult
+
 
 class MainWindow(QMainWindow):
     """日本語カード画像を表示する常時最前面ウィンドウ。"""
 
     candidate_selected = Signal(object)  # JapaneseCard
+    confirm_requested = Signal(object, object, bool)  # (en CardRef, JapaneseCard, same_art)
+    pause_toggled = Signal(bool)
 
     def __init__(self, config: AppConfig | None = None) -> None:
         super().__init__()
         self.config = config or AppConfig()
         self._pixmap: QPixmap | None = None
         self._match = None
+        self._paused = False
 
         self.setWindowTitle("ptcgl")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, self.config.overlay.always_on_top)
@@ -46,6 +63,9 @@ class MainWindow(QMainWindow):
         self._status_label = QLabel("")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._status_label.setStyleSheet("color: #888;")
+        self._watch_label = QLabel("")
+        self._watch_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._watch_label.setStyleSheet("color: #888; font-size: 11px;")
         self._candidates = QListWidget()
         self._candidates.setMaximumHeight(120)
         self._candidates.hide()
@@ -56,12 +76,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._name_label)
         layout.addWidget(self._status_label)
         layout.addWidget(self._candidates)
+        layout.addWidget(self._watch_label)
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
 
         shortcut = QShortcut(QKeySequence("Ctrl+T"), self)
         shortcut.activated.connect(self.toggle_always_on_top)
+        pause = QShortcut(QKeySequence("Ctrl+R"), self)
+        pause.activated.connect(self.toggle_paused)
         self._restore_geometry()
 
     # --- 表示 -------------------------------------------------------------
@@ -104,11 +127,54 @@ class MainWindow(QMainWindow):
     def show_message(self, text: str) -> None:
         self._status_label.setText(text)
 
+    def show_watch_status(self, text: str) -> None:
+        """常駐モードの監視状態（ウィンドウ検出・認識中・一時停止など）を表示する。"""
+        self._watch_label.setText(text)
+
+    def show_window_info(self, info: WindowInfo | None) -> None:
+        """監視対象ウィンドウの状態を表示する（ワーカーの window_changed から呼ばれる）。"""
+        if info is None:
+            self.show_watch_status("PTCGL のウィンドウが見つかりません")
+            return
+        _, _, w, h = info.client_rect
+        if w <= 0 or h <= 0:
+            self.show_watch_status("PTCGL が最小化されています")
+        else:
+            self.show_watch_status(f"監視中: {info.title} ({w}x{h}, DPI {info.dpi})")
+
+    def show_result(self, result: IdentifyResult) -> None:
+        """常駐モードの認識結果を反映する。
+
+        同じカードが続けて認識された場合は表示を変えない。カードが見つからなかった場合も
+        直前の表示を残し、状態行にだけ理由を出す（誤ったカードを出さないため）。
+        """
+        if result.match is None or result.match.best is None:
+            if result.error:
+                self.show_watch_status(result.error)
+            return
+        current = self._match
+        if (
+            current is not None
+            and current.en.ref == result.match.en.ref
+            and current.best is not None
+            and current.best.ref == result.match.best.ref
+        ):
+            return
+        self.show_match(result.match)
+
     def _on_candidate_clicked(self, item: QListWidgetItem) -> None:
         card = item.data(Qt.ItemDataRole.UserRole)
         if card.image_path:
             self.show_card(card.label, card.image_path)
         self.candidate_selected.emit(card)
+        if self._match is not None:
+            # 選んだ候補を記憶し、次回から同じ英語カードにはこの日本語版を出す。
+            # 同一絵柄かどうかはイラストレーターの一致で判定する（別イラスト扱いのまま固定しない）
+            from ptcgl.data.cards import same_illustrator
+
+            same_art = same_illustrator(self._match.en.illustrator, card.illustrator)
+            self.confirm_requested.emit(self._match.en.ref, card, same_art)
+            self._status_label.setText("選択した候補を記憶しました: " + card.label)
 
     def _rescale(self) -> None:
         if self._pixmap is None:
@@ -127,6 +193,18 @@ class MainWindow(QMainWindow):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
         self.config.overlay.always_on_top = on
         self.show()
+
+    def toggle_paused(self) -> None:
+        self._paused = not self._paused
+        self.pause_toggled.emit(self._paused)
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        # setWindowFlag でネイティブウィンドウが作り直されるため、表示のたびに適用する
+        if self.config.overlay.exclude_from_capture:
+            from ptcgl.capture.window import set_exclude_from_capture
+
+            set_exclude_from_capture(int(self.winId()), True)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)

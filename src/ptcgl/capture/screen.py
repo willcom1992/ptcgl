@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Any
 
 import numpy as np
 
@@ -15,23 +16,41 @@ class ScreenCapture:
 
     def __init__(self, region: Rect | None = None) -> None:
         self.region = region
+        self._sct: Any = None  # 常駐モードでは毎回作り直さず使い回す（作成コストが大きい）
+
+    def _session(self) -> Any:
+        if self._sct is None:
+            import mss
+
+            from ptcgl.capture.window import ensure_dpi_aware
+
+            ensure_dpi_aware()  # mss が先に V1 の DPI 対応を宣言してしまうのを防ぐ
+            self._sct = mss.mss()
+        return self._sct
+
+    def close(self) -> None:
+        if self._sct is not None:
+            try:
+                self._sct.close()
+            finally:
+                self._sct = None
 
     def grab(self, region: Rect | None = None) -> np.ndarray:
-        import mss
-
-        from ptcgl.capture.window import ensure_dpi_aware
-
-        ensure_dpi_aware()  # mss が先に V1 の DPI 対応を宣言してしまうのを防ぐ
         region = region or self.region
-        with mss.mss() as sct:
+        sct = self._session()
+        try:
             if region is None:
                 monitor = sct.monitors[1]  # プライマリモニタ
             else:
                 left, top, width, height = region
                 monitor = {"left": left, "top": top, "width": width, "height": height}
             shot = sct.grab(monitor)
-            frame = np.asarray(shot)  # BGRA
-            return frame[:, :, :3].copy()  # BGR
+        except Exception:
+            # 画面ロックやモニター構成変更で DC が無効になることがあるため、次回は作り直す
+            self.close()
+            raise
+        frame = np.asarray(shot)  # BGRA
+        return frame[:, :, :3].copy()  # BGR
 
 
 def list_monitors() -> list[dict[str, int]]:

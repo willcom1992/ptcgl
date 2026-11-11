@@ -38,4 +38,4 @@ pyinstaller packaging/ptcgl.spec   # 配布用ビルド（dist/ptcgl/ptcgl.exe�
 精度の計測は `assets/samples/` にスクリーンショットと `labels.csv` を置いて
 `python scripts/evaluate.py assets/samples --out docs/validation-results.md` を実行します。
 
-詳細は [docs/spec.md](docs/spec.md) と [docs/architecture.md](docs/architecture.md) を参照してください。
+使い方の詳細は [docs/usage.md](docs/usage.md)、要件は [docs/spec.md](docs/spec.md)、設計は [docs/architecture.md](docs/architecture.md) を参照してください。
