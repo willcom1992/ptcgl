@@ -2,12 +2,14 @@
 
 Pokémon TCG Live（PTCGL）の画面に表示される英語カードを認識し、対応する日本語版ポケモンカード画像を表示する Windows デスクトップアプリです。
 
+![PTCGL の画面と、右端に表示された日本語カードビューア](docs/images/overview.jpg)
+
 - ゲーム本体のファイル・メモリ・通信には一切触れず、画面キャプチャだけで動作します
 - カード画像の出典は Limitless TCG（日本語画像は pokemon-card.com 由来）です。**個人利用・ローカルキャッシュのみ**を前提とし、取得した画像やアプリの再配布は行いません
 
 ## 必要環境
 - Windows 10/11
-- Python 3.12（開発時）。配布版は PyInstaller で Python を同梱する予定
+- Python 3.12（開発時）。配布版（`dist/ptcgl`）は Python 同梱で、受け取る側のインストールは不要
 
 ## セットアップ
 ```powershell
@@ -38,4 +40,4 @@ pyinstaller packaging/ptcgl.spec   # 配布用ビルド（dist/ptcgl/ptcgl.exe�
 精度の計測は `assets/samples/` にスクリーンショットと `labels.csv` を置いて
 `python scripts/evaluate.py assets/samples --out docs/validation-results.md` を実行します。
 
-使い方の詳細は [docs/usage.md](docs/usage.md)、要件は [docs/spec.md](docs/spec.md)、設計は [docs/architecture.md](docs/architecture.md) を参照してください。
+遊ぶ人向けの使い方（準備・画面の見方・困ったとき）は [docs/usage.md](docs/usage.md) の 1〜6 章、開発者向けは同 7 章以降、要件は [docs/spec.md](docs/spec.md)、設計は [docs/architecture.md](docs/architecture.md) を参照してください。

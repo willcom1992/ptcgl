@@ -25,6 +25,8 @@ config.local.toml
 *.jpeg
 !assets/samples/*.png
 !assets/samples/*.jpg
+!docs/images/*.png
+!docs/images/*.jpg
 
 # Editor / OS
 .vscode/
