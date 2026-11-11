@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tools
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# App
+cache/
+*.log
+config.local.toml
+
+# Images (assets/samples 以外のスクリーンショット等)
+*.png
+*.jpg
+*.jpeg
+!assets/samples/*.png
+!assets/samples/*.jpg
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Claude Code (個人設定)
+.claude/settings.local.json
