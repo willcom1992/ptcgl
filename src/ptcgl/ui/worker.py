@@ -110,17 +110,17 @@ class RecognitionWorker(QObject):
             self.status_changed.emit("一時停止中（Ctrl+R で再開）")
         else:
             self._session.watcher.reset()
-            self.status_changed.emit("監視を再開しました")
+            self.status_changed.emit("監視中")
 
     @Slot(object, object, bool)
     def confirm(self, en_ref: object, card: object, same_art: bool) -> None:
         """ユーザーが候補一覧から選んだ日本語版を保存する。"""
         try:
             self._pipeline.confirm(en_ref, card, same_art)  # type: ignore[arg-type]
-            self.status_changed.emit(f"選択を保存しました: {card.label}")  # type: ignore[attr-defined]
-        except Exception as exc:
+            # 成功の表示は MainWindow 側が行う（二重に出さない）
+        except Exception:
             log.exception("選択の保存に失敗")
-            self.status_changed.emit(f"選択の保存に失敗: {exc}")
+            self.status_changed.emit("選択の保存に失敗しました")
 
     @Slot(object)
     def identify_ref(self, ref: object) -> None:
@@ -141,7 +141,20 @@ class RecognitionWorker(QObject):
         window = self._session.window
         key = (window.hwnd, window.client_rect) if window is not None else None
         if key != self._last_window_key:
+            previous_hwnd = self._last_window_key[0] if self._last_window_key else None
             self._last_window_key = key
+            if window is None:
+                log.info("監視対象: PTCGL のウィンドウが見つかりません")
+            elif window.hwnd != previous_hwnd:
+                log.info(
+                    "監視対象: %s hwnd=%s rect=%s dpi=%s",
+                    window.title,
+                    window.hwnd,
+                    window.client_rect,
+                    window.dpi,
+                )
+            else:  # 移動・サイズ変更中は毎ティック変わるので DEBUG に落とす
+                log.debug("監視対象の矩形: %s dpi=%s", window.client_rect, window.dpi)
             self.window_changed.emit(window)
 
         if event.kind == "result" and event.result is not None:
@@ -156,11 +169,8 @@ class RecognitionWorker(QObject):
                 r.error,
             )
             self.result_ready.emit(event.result)
-            if event.result.ok:
-                secs = event.elapsed_ms / 1000
-                self.status_changed.emit(f"認識 {secs:.1f} 秒")
-            else:
-                self.status_changed.emit(event.message or "カードを特定できません")
+            # 画面には操作に関わる状態だけを出す。秒数や失敗理由はログファイルに残す
+            self.status_changed.emit("監視中" if event.result.ok else "カードを特定できません")
         elif event.kind in ("no_window", "minimized", "error"):
             self.status_changed.emit(event.message)
 

@@ -139,10 +139,28 @@ def list_windows() -> list[WindowInfo]:
     return result
 
 
+def is_own_window(hwnd: int) -> bool:
+    """このプロセス自身のウィンドウか（表示ウィンドウを PTCGL と誤認しないため）。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        import os
+
+        import win32process
+
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        return pid == os.getpid()
+    except Exception:
+        return False
+
+
 def find_window(
     title_pattern: str | None = None, process_name: str | None = None
 ) -> WindowInfo | None:
-    """タイトル（正規表現・大文字小文字無視）またはプロセス名でウィンドウを探す。"""
+    """タイトル（正規表現・大文字小文字無視）またはプロセス名でウィンドウを探す。
+
+    自分自身のウィンドウは、タイトルがパターンに一致しても対象にしない。
+    """
     pattern = None
     if title_pattern:
         try:
@@ -150,6 +168,8 @@ def find_window(
         except re.error:  # 設定に不正な正規表現が入っていてもリテラルとして扱う
             pattern = re.compile(re.escape(title_pattern), re.IGNORECASE)
     for info in list_windows():
+        if is_own_window(info.hwnd):
+            continue
         if process_name and info.process_name.lower() == process_name.lower():
             return info
         if pattern and pattern.search(info.title):

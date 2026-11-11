@@ -305,7 +305,8 @@ def test_session_survives_capture_and_identify_errors() -> None:
 
     s = WatchSession(fake.find, fake.refresh, bad_grab, fake.identify)
     ev = s.step()
-    assert ev.kind == "error" and "screen locked" in ev.message
+    # 例外の内容は画面に出さずログに残す
+    assert ev.kind == "error" and ev.message == "キャプチャに失敗しました"
 
     def bad_identify(frame):  # noqa: ANN001, ANN202
         raise RuntimeError("ocr broke")
@@ -314,6 +315,6 @@ def test_session_survives_capture_and_identify_errors() -> None:
     s = WatchSession(fake.find, fake.refresh, fake.grab, bad_identify)
     s.step()
     ev = s.step()
-    assert ev.kind == "error" and "ocr broke" in ev.message
+    assert ev.kind == "error" and ev.message == "認識に失敗しました"
     assert s.step().kind == "error"  # 静止したので再試行
     assert s.step().kind == "idle"  # 静止画面での失敗は基準になり、画面が変わるまで再試行しない

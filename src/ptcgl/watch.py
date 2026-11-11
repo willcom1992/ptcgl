@@ -179,6 +179,9 @@ class FrameWatcher:
 
 @dataclass(frozen=True)
 class WatchEvent:
+    """1 ステップの結果。`message` は no_window / minimized / error では画面向けの短い文言、
+    result では失敗理由（ログ用。画面には出さない）。"""
+
     """1 回の監視ステップの結果。"""
 
     kind: str  # "no_window" | "minimized" | "idle" | "result" | "error"
@@ -275,7 +278,7 @@ class WatchSession:
             frame = self._grab(window.client_rect)
         except Exception as exc:  # 画面ロック・解像度変更中など
             log.warning("キャプチャに失敗: %s", exc)
-            return WatchEvent("error", f"キャプチャに失敗: {exc}")
+            return WatchEvent("error", "キャプチャに失敗しました")
         decision = self.watcher.decide(frame)
         if not decision.recognize:
             return WatchEvent("idle")
@@ -284,10 +287,10 @@ class WatchSession:
         t0 = time.perf_counter()
         try:
             result = self._recognize(frame, decision.region)
-        except Exception as exc:
+        except Exception:
             log.exception("認識中にエラー")
             self.watcher.mark_recognized(frame, found=False)
-            return WatchEvent("error", f"認識に失敗: {exc}")
+            return WatchEvent("error", "認識に失敗しました")
         self.watcher.mark_recognized(frame, found=result.ok)
         elapsed = (time.perf_counter() - t0) * 1000
         return WatchEvent(

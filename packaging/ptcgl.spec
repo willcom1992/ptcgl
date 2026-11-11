@@ -50,7 +50,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,  # Phase 0 はログ確認のためコンソール付き。配布時に False にする
+    console=False,  # 動作ログは user_data_dir/ptcgl.log に残す（app.configure_file_logging）
 )
 coll = COLLECT(
     exe,

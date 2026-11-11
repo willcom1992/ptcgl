@@ -192,6 +192,13 @@ class Pipeline:
             if cached.best.image_path.exists():
                 result.match = cached
                 result.timings_ms["match"] = (time.perf_counter() - t0) * 1000
+                log.info(
+                    "照合（キャッシュ）: %s -> %s same_art=%s (%s)",
+                    ref,
+                    cached.best.ref,
+                    cached.same_art,
+                    cached.reason,
+                )
                 return result
             self._match_cache.pop(ref, None)  # 画像が消されていたら取り直す
         try:
@@ -207,6 +214,13 @@ class Pipeline:
                         match.candidates[i] = best
                 match.best = best
             result.match = match
+            log.info(
+                "照合: %s -> %s same_art=%s (%s)",
+                ref,
+                match.best.ref if match.best is not None else None,
+                match.same_art,
+                match.reason,
+            )
             if match.best is not None and match.best.image_path is not None:
                 # 画像まで揃った結果だけ覚える（取得に失敗した場合は次回また試す）
                 if len(self._match_cache) >= MATCH_CACHE_SIZE:

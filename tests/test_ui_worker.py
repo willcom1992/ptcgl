@@ -84,7 +84,7 @@ def test_worker_emits_window_then_result(qtbot, monkeypatch) -> None:  # noqa: A
     w._tick()
     assert len(results) == 1 and results[0].ok
     assert pipeline.calls == 1
-    assert statuses[-1].startswith("認識 ")
+    assert statuses[-1] == "監視中"
 
 
 def test_worker_pause_skips_ticks(qtbot, monkeypatch) -> None:  # noqa: ANN001
@@ -103,7 +103,27 @@ def test_worker_confirm_delegates_to_repository(qtbot, monkeypatch) -> None:  # 
     w.status_changed.connect(statuses.append)
     w.confirm(m.en.ref, m.best, False)
     assert pipeline.repo.confirmed == [(m.en.ref, m.best, False)]
-    assert "保存" in statuses[-1]
+    assert statuses == []  # 成功の表示は MainWindow 側だけが出す
+
+
+def test_worker_emits_fixed_status_on_failed_recognition(qtbot, monkeypatch) -> None:  # noqa: ANN001
+    pipeline = _FakePipeline()
+
+    def fail(frame, box=None, native_retry=True):  # noqa: ANN001, ANN202
+        return IdentifyResult(
+            error="拡大表示されたカードが見つかりません（番号・HP のいずれも検出できず）"
+        )
+
+    pipeline.identify_frame = fail  # type: ignore[method-assign]
+    frame = np.full((8, 8, 3), 50, dtype=np.uint8)
+    changed = np.full((8, 8, 3), 200, dtype=np.uint8)
+    w = _worker(monkeypatch, pipeline, [frame, changed])
+    statuses: list[str] = []
+    w.status_changed.connect(statuses.append)
+    w._tick()
+    w._tick()
+    # 失敗理由は画面に出さず、固定の短い文言だけを出す
+    assert statuses[-1] == "カードを特定できません"
 
 
 def test_main_window_show_result_keeps_last_card_on_failure(qtbot, tmp_path: Path) -> None:  # noqa: ANN001
@@ -118,9 +138,11 @@ def test_main_window_show_result_keeps_last_card_on_failure(qtbot, tmp_path: Pat
     qtbot.addWidget(win)
     win.show_result(IdentifyResult(match=_match(image=image)))
     assert "リオル" in win._name_label.text()
+    win.show_watch_status("監視中")
     win.show_result(IdentifyResult(error="拡大表示されたカードが見つかりません"))
     assert "リオル" in win._name_label.text()
-    assert "見つかりません" in win._watch_label.text()
+    # 失敗理由は画面に出さない（ログに残す）。状態行はワーカーが更新する
+    assert win._watch_label.text() == "監視中"
 
 
 def test_main_window_candidate_click_requests_confirm(qtbot) -> None:  # noqa: ANN001
@@ -169,3 +191,17 @@ def test_main_window_candidate_click_marks_same_art_by_illustrator(qtbot) -> Non
     win.confirm_requested.connect(lambda en, jp, same_art: received.append(same_art))
     win._on_candidate_clicked(win._candidates.item(1))
     assert received == [True]
+
+
+def test_main_window_title_does_not_match_ptcgl_pattern(qtbot) -> None:  # noqa: ANN001
+    import re
+
+    from ptcgl.ui.main_window import WINDOW_TITLE, MainWindow
+
+    cfg = AppConfig()
+    cfg.overlay.exclude_from_capture = False
+    win = MainWindow(cfg)
+    qtbot.addWidget(win)
+    assert win.windowTitle() == WINDOW_TITLE
+    # 自分のウィンドウを PTCGL と誤認しない
+    assert re.search(cfg.target_window.title_pattern, WINDOW_TITLE) is None

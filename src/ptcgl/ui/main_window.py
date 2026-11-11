@@ -3,8 +3,9 @@
 - 画像はウィンドウサイズに追従して拡縮する
 - 候補が複数あるときは一覧から選択でき、選択結果は呼び出し側へシグナルで通知する
 - Ctrl+T で最前面表示を切り替える。位置・サイズはモニターに対する比率で設定に保存する
-- Ctrl+R で常駐モードの監視を一時停止・再開する
+- Ctrl+R で常駐モードの監視を一時停止・再開する。Ctrl+Q で終了する
 - 自分自身を画面キャプチャから除外し、PTCGL に重ねて置いても認識の邪魔にならないようにする
+- 状態行には操作に関わる状態だけを出す。認識秒数や失敗理由はログファイルに残す
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import (
     QKeySequence,
     QMoveEvent,
@@ -37,6 +38,12 @@ if TYPE_CHECKING:
     from ptcgl.pipeline import IdentifyResult
 
 
+# ウィンドウのタイトル。PTCGL 側のウィンドウ検出（target_window.title_pattern）に
+# 引っかからないよう、"Pokemon TCG Live" という並びは含めない
+WINDOW_TITLE = "PTCGL 日本語カードビューア"
+_MAX_CANDIDATE_ROWS = 3  # 候補一覧をこの行数までの高さに抑える
+
+
 class MainWindow(QMainWindow):
     """日本語カード画像を表示する常時最前面ウィンドウ。"""
 
@@ -51,7 +58,7 @@ class MainWindow(QMainWindow):
         self._match = None
         self._paused = False
 
-        self.setWindowTitle("ptcgl")
+        self.setWindowTitle(WINDOW_TITLE)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, self.config.overlay.always_on_top)
 
         self._image_label = QLabel("PTCGL のカードを待機中...")
@@ -60,18 +67,22 @@ class MainWindow(QMainWindow):
         self._name_label = QLabel("")
         self._name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._name_label.setWordWrap(True)
+        self._name_label.setStyleSheet("font-size: 14px; font-weight: bold;")
         self._status_label = QLabel("")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._status_label.setStyleSheet("color: #888;")
+        self._status_label.setStyleSheet("color: #b36b00;")
         self._watch_label = QLabel("")
         self._watch_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._watch_label.setStyleSheet("color: #888; font-size: 11px;")
+        self._watch_label.setStyleSheet("color: #666; font-size: 12px;")
         self._candidates = QListWidget()
-        self._candidates.setMaximumHeight(120)
+        self._candidates.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._candidates.setTextElideMode(Qt.TextElideMode.ElideRight)  # 長い名前は省略して 1 行に
+        self._candidates.setUniformItemSizes(True)
         self._candidates.hide()
         self._candidates.itemClicked.connect(self._on_candidate_clicked)
 
         layout = QVBoxLayout()
+        layout.setSpacing(2)  # カード名・候補一覧・状態行を詰めて並べる
         layout.addWidget(self._image_label, stretch=1)
         layout.addWidget(self._name_label)
         layout.addWidget(self._status_label)
@@ -80,11 +91,11 @@ class MainWindow(QMainWindow):
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+        self._status_label.hide()  # 空のラベルが余白にならないよう、文字があるときだけ出す
 
-        shortcut = QShortcut(QKeySequence("Ctrl+T"), self)
-        shortcut.activated.connect(self.toggle_always_on_top)
-        pause = QShortcut(QKeySequence("Ctrl+R"), self)
-        pause.activated.connect(self.toggle_paused)
+        QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(self.toggle_always_on_top)
+        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self.toggle_paused)
+        QShortcut(QKeySequence("Ctrl+Q"), self).activated.connect(self.close)
         self._restore_geometry()
 
     # --- 表示 -------------------------------------------------------------
@@ -109,10 +120,9 @@ class MainWindow(QMainWindow):
             self._pixmap = None
             self._image_label.setText("対応する日本語版が見つかりません")
             self._name_label.setText(match.en.name)
-        status = match.reason
-        if match.best is not None and not match.same_art:
-            status = "別イラスト（要確認）: " + status
-        self._status_label.setText(status)
+        # 照合の理由文はログに残し、画面にはユーザーの確認が要る場合だけ短く出す
+        same_art = match.best is None or match.same_art
+        self.show_message("" if same_art else "別イラスト（要確認）")
 
         self._candidates.clear()
         if len(match.candidates) > 1:
@@ -120,12 +130,22 @@ class MainWindow(QMainWindow):
                 item = QListWidgetItem(card.label or str(card.ref))
                 item.setData(Qt.ItemDataRole.UserRole, card)
                 self._candidates.addItem(item)
+            self._fit_candidates()
             self._candidates.show()
         else:
             self._candidates.hide()
+        # 状態行や候補一覧の表示・非表示で画像の領域が変わるので、レイアウト確定後に拡縮し直す
+        QTimer.singleShot(0, self._rescale)
+
+    def _fit_candidates(self) -> None:
+        """候補一覧の高さを行数に合わせる（最大 _MAX_CANDIDATE_ROWS 行、それ以上はスクロール）。"""
+        rows = min(self._candidates.count(), _MAX_CANDIDATE_ROWS)
+        row_h = self._candidates.sizeHintForRow(0)
+        self._candidates.setFixedHeight(rows * row_h + self._candidates.frameWidth() * 2)
 
     def show_message(self, text: str) -> None:
         self._status_label.setText(text)
+        self._status_label.setVisible(bool(text))
 
     def show_watch_status(self, text: str) -> None:
         """常駐モードの監視状態（ウィンドウ検出・認識中・一時停止など）を表示する。"""
@@ -140,17 +160,16 @@ class MainWindow(QMainWindow):
         if w <= 0 or h <= 0:
             self.show_watch_status("PTCGL が最小化されています")
         else:
-            self.show_watch_status(f"監視中: {info.title} ({w}x{h}, DPI {info.dpi})")
+            self.show_watch_status("監視中")
 
     def show_result(self, result: IdentifyResult) -> None:
         """常駐モードの認識結果を反映する。
 
         同じカードが続けて認識された場合は表示を変えない。カードが見つからなかった場合も
-        直前の表示を残し、状態行にだけ理由を出す（誤ったカードを出さないため）。
+        直前の表示を残す（誤ったカードを出さないため）。失敗の理由はログに残し、状態行は
+        ワーカーの `status_changed` が「カードを特定できません」に更新する。
         """
         if result.match is None or result.match.best is None:
-            if result.error:
-                self.show_watch_status(result.error)
             return
         current = self._match
         if (
@@ -174,7 +193,7 @@ class MainWindow(QMainWindow):
 
             same_art = same_illustrator(self._match.en.illustrator, card.illustrator)
             self.confirm_requested.emit(self._match.en.ref, card, same_art)
-            self._status_label.setText("選択した候補を記憶しました: " + card.label)
+            self.show_message("選択した候補を記憶しました: " + card.label)
 
     def _rescale(self) -> None:
         if self._pixmap is None:

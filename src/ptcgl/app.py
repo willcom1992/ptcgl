@@ -59,6 +59,15 @@ def configure_file_logging() -> None:
         log.warning("ログファイルを開けません: %s", exc)
 
 
+def _log_uncaught(exc_type, exc, tb) -> None:  # noqa: ANN001
+    """未捕捉例外をログファイルに残す（コンソール無しの exe では標準エラーが見えないため）。"""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc, tb)
+        return
+    log.critical("未捕捉の例外で終了します", exc_info=(exc_type, exc, tb))
+    sys.__excepthook__(exc_type, exc, tb)
+
+
 def main(argv: list[str] | None = None) -> int:
     """常駐モードでアプリケーションを起動し、終了コードを返す。
 
@@ -71,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     from ptcgl.ui.worker import RecognitionWorker, WorkerThread
 
     configure_file_logging()
+    sys.excepthook = _log_uncaught
     cfg = load_config()
     app = _create_app(argv if argv is not None else sys.argv)
     log.info(
