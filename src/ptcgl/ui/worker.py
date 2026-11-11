@@ -8,6 +8,7 @@ Pipeline（OCR エンジン・HTTP クライアント・SQLite）はこのスレ
 from __future__ import annotations
 
 import logging
+from functools import partial
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
@@ -47,7 +48,8 @@ class RecognitionWorker(QObject):
             find_window=self._find,
             refresh_window=self._refresh,
             grab=self._capture.grab,
-            identify=self._pipeline.identify_frame,
+            # 高速パスが先に走るので、通常パイプラインでは元解像度の読み直しを省く（失敗を短くする）
+            identify=partial(self._pipeline.identify_frame, native_retry=False),
             identify_fast=self._pipeline.identify_fast,
             watcher=FrameWatcher(
                 change_threshold=config.capture.change_threshold,
@@ -114,7 +116,7 @@ class RecognitionWorker(QObject):
     def confirm(self, en_ref: object, card: object, same_art: bool) -> None:
         """ユーザーが候補一覧から選んだ日本語版を保存する。"""
         try:
-            self._pipeline.repo.confirm(en_ref, card, same_art)  # type: ignore[arg-type]
+            self._pipeline.confirm(en_ref, card, same_art)  # type: ignore[arg-type]
             self.status_changed.emit(f"選択を保存しました: {card.label}")  # type: ignore[attr-defined]
         except Exception as exc:
             log.exception("選択の保存に失敗")

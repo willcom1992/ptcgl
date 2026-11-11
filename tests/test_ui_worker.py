@@ -37,8 +37,11 @@ class _FakePipeline:
         self.repo = _FakeRepo()
         self.calls = 0
 
-    def identify_frame(self, frame: np.ndarray, box=None) -> IdentifyResult:  # noqa: ANN001
+    def identify_frame(
+        self, frame: np.ndarray, box=None, native_retry: bool = True
+    ) -> IdentifyResult:  # noqa: ANN001
         self.calls += 1
+        assert native_retry is False  # 常駐モードでは元解像度の読み直しを省く
         return IdentifyResult(en_ref=CardRef("en", "MEG", "76"), match=_match())
 
     def identify_fast(self, frame: np.ndarray, full_frame: bool = False) -> IdentifyResult:
@@ -46,6 +49,9 @@ class _FakePipeline:
 
     def identify_ref(self, ref: CardRef) -> IdentifyResult:
         return IdentifyResult(en_ref=ref, match=_match())
+
+    def confirm(self, en_ref, jp, same_art) -> None:  # noqa: ANN001
+        self.repo.confirm(en_ref, jp, same_art)
 
 
 def _worker(monkeypatch, pipeline: _FakePipeline, frames: list[np.ndarray]):  # noqa: ANN001, ANN202

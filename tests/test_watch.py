@@ -11,6 +11,7 @@ from ptcgl.pipeline import IdentifyResult
 from ptcgl.recognition.detector import CardBox
 from ptcgl.watch import (
     MAX_BACKOFF_TICKS,
+    MAX_STABLE_BACKOFF_TICKS,
     FrameWatcher,
     WatchSession,
     _thumbnail,
@@ -116,6 +117,62 @@ def test_watcher_stable_failure_updates_reference() -> None:
     assert w.unstable_limit == 1
 
 
+def test_watcher_backs_off_after_repeated_stable_failures() -> None:
+    # 演出の合間に静止する盤面: 静止画面での失敗が続くと、次の変化から 2, 4, 8 ティック待つ
+    w = FrameWatcher(change_threshold=4.0, stable_threshold=1.5)
+    w.decide(_frame(40))
+    value = 40
+
+    def change_and_count() -> int:
+        """画面を変え、認識が走るまでのティック数を返す。"""
+        nonlocal value
+        value = (value + 60) % 256
+        for i in range(1, 100):
+            if w.decide(_frame(value)).recognize:
+                return i
+        return 0
+
+    assert change_and_count() == 1  # 最初は静止を待たずに認識
+    w.mark_recognized(_frame(value), found=False)  # 動いている最中の失敗
+    d = w.decide(_frame(value))
+    assert d.recognize is True and d.stable is True  # 静止したので待たずに読む
+    w.mark_recognized(_frame(value), found=False)  # 静止画面での失敗 1 回目
+    assert w.stable_limit == 2
+    assert change_and_count() == 2
+    w.mark_recognized(_frame(value), found=False)  # 2 回目
+    assert change_and_count() == 4
+    w.mark_recognized(_frame(value), found=False)  # 3 回目
+    assert change_and_count() == 8
+    w.mark_recognized(_frame(value), found=False)  # 4 回目: 上限
+    assert change_and_count() == MAX_STABLE_BACKOFF_TICKS
+    w.mark_recognized(_frame(value), found=True)  # 見つかれば元に戻る
+    assert w.stable_limit == 0 and w.unstable_limit == 1
+    assert change_and_count() == 1
+
+
+def test_watcher_stable_backoff_counts_from_the_change() -> None:
+    # 静止画面での失敗のあと、しばらく静止してから画面が変わっても待ちは「変化してから」数える
+    w = FrameWatcher(change_threshold=4.0, stable_threshold=1.5)
+    w.decide(_frame(40))
+    w.decide(_frame(100))
+    w.decide(_frame(100))
+    w.mark_recognized(_frame(100), found=False)  # 静止画面での失敗 → 次の変化から 2 ティック待つ
+    for _ in range(10):
+        assert w.decide(_frame(100)).recognize is False  # 変化なし
+    assert w.decide(_frame(160)).recognize is False  # 変化 1 ティック目: 待つ
+    assert w.decide(_frame(160)).recognize is True  # 2 ティック目
+
+
+def test_watcher_unstable_failure_then_stable_frame_is_not_delayed() -> None:
+    # 動いている最中の失敗の直後に静止したら、静止画面の待ちは掛からない
+    w = FrameWatcher(change_threshold=4.0, stable_threshold=1.5)
+    w.decide(_frame(40))
+    assert w.decide(_frame(200)).recognize is True
+    w.mark_recognized(_frame(200), found=False)
+    assert w.stable_limit == 0
+    assert w.decide(_frame(200)).recognize is True
+
+
 def test_watcher_reset_forgets_history() -> None:
     w = FrameWatcher()
     w.decide(_frame(40))
@@ -201,6 +258,28 @@ def test_session_region_hit_skips_full_frame() -> None:
     box = ev.result.card_box
     assert box is not None and 0 < box.rx < 0.4 and box.rw < 0.5
     assert s.step().kind == "idle"
+
+
+def test_session_always_falls_back_to_full_ocr_after_fast_path() -> None:
+    # 高速パスの HP バッジ候補が 0 でも通常パイプラインは省かない
+    # （高速パスの候補条件は通常パイプラインのアンカー判定より狭く、取りこぼす恐れがある）
+    fake = _Fake()
+    fast_calls: list[bool] = []
+
+    def identify_fast(frame: np.ndarray, full_frame: bool = False) -> IdentifyResult:
+        fast_calls.append(full_frame)
+        res = IdentifyResult(error="番号行が見つかりません（高速パス）")
+        if full_frame:
+            res.hp_badge_rois = 0
+        return res
+
+    fake.frames = [_frame(40), _frame_with_card(40, 220)]
+    s = WatchSession(fake.find, fake.refresh, fake.grab, fake.identify, identify_fast=identify_fast)
+    s.step()
+    ev = s.step()
+    assert ev.kind == "result" and ev.result is not None and not ev.result.ok
+    assert fast_calls == [False, True]  # 変化領域 → 全画面
+    assert fake.identify_calls == [(720, 1280)]
 
 
 def test_session_resets_watcher_when_window_is_replaced() -> None:

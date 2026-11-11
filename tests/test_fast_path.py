@@ -114,11 +114,28 @@ def test_fast_path_reports_failure_without_number(tmp_path: Path) -> None:
     assert not result.ok and result.error is not None and "番号行" in result.error
 
 
-def test_fast_path_retries_detection_at_native_resolution(tmp_path: Path) -> None:
+def test_fast_path_does_not_redetect_at_native_resolution(tmp_path: Path) -> None:
+    # 元解像度の再検出は成功率が極めて低く（常駐ログで約 150 回に 1 回）、
+    # 失敗を 0.6 秒遅らせるため行わない
     ocr = _FakeOcr({"label": _box(60, 160, 180, 180)}, {"label": "Basic"})
     frame = np.zeros((1400, 1200, 3), dtype=np.uint8)
-    _pipeline(tmp_path, ocr).identify_fast(frame)
-    assert ocr.detect_calls == [960, None]  # 縮小 → 元解像度の順
+    result = _pipeline(tmp_path, ocr).identify_fast(frame)
+    assert ocr.detect_calls == [960]
+    assert result.hp_badge_rois is None  # 全画面でなければ HP バッジは評価しない
+
+
+def test_fast_path_reports_hp_badge_candidates_on_full_frame(tmp_path: Path) -> None:
+    # 番号行が無く HP バッジ候補も無い全画面: 候補数 0 を返す（ログ用）
+    ocr = _FakeOcr({"label": _box(60, 160, 180, 180)}, {"label": "Basic"})
+    frame = np.zeros((1000, 1600, 3), dtype=np.uint8)
+    result = _pipeline(tmp_path, ocr).identify_fast(frame, full_frame=True)
+    assert not result.ok and result.hp_badge_rois == 0
+
+    # HP バッジらしい大きな箱（2〜3 桁の数字で終わる）があれば候補数 > 0
+    boxes = {"label": _box(60, 160, 180, 180), "hp": _box(1200, 100, 1300, 140)}
+    ocr = _FakeOcr(boxes, {"label": "Basic", "hp": "110"})
+    result = _pipeline(tmp_path, ocr).identify_fast(frame, full_frame=True)
+    assert not result.ok and result.hp_badge_rois == 1
 
 
 @pytest.mark.parametrize("angle", [0.0, 12.0])

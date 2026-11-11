@@ -18,6 +18,7 @@ from ptcgl.data.limitless import (
     PrintEntry,
     build_search_query,
     jp_image_url,
+    normalize_search_text,
     parse_card_page,
     parse_search_results,
     search_url,
@@ -140,16 +141,26 @@ class CardRepository:
     ) -> list[CardRef]:
         """名前・HP・ワザ名で英語カードを検索する（番号が読めない対戦中の詳細表示用）。
 
-        ワザ名の条件で 0 件なら条件を緩めて再検索する。
+        まず名前と HP だけで検索する（OCR の揺れが少なくキャッシュが効き、1 件に絞れることが多い）。
+        複数件のときだけワザ名を加えて絞り込み、0 件なら最も不確かな（末尾の）条件から外して
+        再検索する。どの条件でも絞れなければ名前と HP の結果を返す。
         """
-        terms = list(text_terms or [])
-        while True:
-            query = build_search_query(name, hp, terms)
-            html = self._http.get_text(search_url(query), max_age=PAGE_MAX_AGE_SECONDS)
-            refs, _ = parse_search_results(html)
-            if refs or not terms:
-                return refs
-            terms.pop()  # 最も不確かな（末尾の）条件から外す
+        name = normalize_search_text(name)
+        refs = self._search(build_search_query(name, hp, None))
+        terms = [normalize_search_text(t) for t in text_terms or []]
+        if len(refs) <= 1:
+            return refs
+        while terms:
+            narrowed = self._search(build_search_query(name, hp, terms))
+            if narrowed:
+                return narrowed
+            terms.pop()
+        return refs
+
+    def _search(self, query: str) -> list[CardRef]:
+        html = self._http.get_text(search_url(query), max_age=PAGE_MAX_AGE_SECONDS)
+        refs, _ = parse_search_results(html)
+        return refs
 
     def image_path_for(self, ref: CardRef) -> Path:
         return self._images_dir / ref.lang / f"{ref.set_code}_{ref.number}.png"

@@ -115,6 +115,19 @@ def search_url(query: str) -> str:
     return f"{BASE_URL}/cards?q={quote_plus(query)}"
 
 
+_CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
+
+
+def normalize_search_text(text: str) -> str:
+    """OCR で空白が落ちた名前・ワザ名を Limitless の検索で通る形に直す。
+
+    例: "MegaLucario" → "Mega Lucario"、"LunarCycle" → "Lunar Cycle"。
+    大文字が続く略語（"HP" など）や既に空白のある文字列はそのまま。
+    小文字で始まる語（"ex" など）には手を付けない（"Complex" を "Compl ex" にしない）。
+    """
+    return " ".join(_CAMEL_SPLIT_RE.sub(" ", word) for word in text.split())
+
+
 def build_search_query(
     name: str,
     hp: int | None = None,

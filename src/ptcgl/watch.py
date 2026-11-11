@@ -11,7 +11,9 @@
 - 静止していないフレームで失敗したときは基準フレームを更新しない（静止後に再度変化として拾う）。
   失敗が続いたら試行間隔を 1, 2, 4 … 回（上限 MAX_BACKOFF_TICKS）と倍々に延ばし、
   演出が続く盤面で OCR が走り続けないようにする
-- 静止したフレームで認識したら成否にかかわらず基準にし、画面が変わるまで再試行しない
+- 静止したフレームで認識したら成否にかかわらず基準にし、画面が変わるまで再試行しない。
+  静止画面での失敗が続く場合（演出の合間に止まる盤面）は、次に画面が変化してから 2, 4, 8 回
+  （上限 MAX_STABLE_BACKOFF_TICKS）だけ待って試す
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ _REGION_PIXEL_THRESHOLD = 24  # 変化した画素とみなす輝度差（0-255�
 _REGION_PAD_RATIO = 0.04  # 変化領域の外側に足す余白（フレーム比）
 MAX_REGION_AREA = 0.6  # これより広く変化していれば全画面扱い
 MAX_BACKOFF_TICKS = 40
+MAX_STABLE_BACKOFF_TICKS = 8  # 静止画面での連続失敗後に待つ最大ティック数（既定 2 秒）
 WINDOW_SEARCH_EVERY_TICKS = 8  # PTCGL が見つからない間は 8 ティック（既定 2 秒）に 1 回だけ探す
 
 
@@ -92,20 +95,31 @@ class FrameWatcher:
         self._reference: np.ndarray | None = None  # 最後に認識した（または基準にした）フレーム
         self._previous: np.ndarray | None = None
         self._ticks_since_attempt = 0
+        self._ticks_since_change = 0  # 基準フレームと違う画面が続いているティック数
         self._unstable_failures = 0  # 静止しないまま認識して失敗した連続回数
+        self._stable_failures = 0  # 静止した画面で認識して失敗した連続回数
         self._last_decision_stable = True
 
     def reset(self) -> None:
         self._reference = None
         self._previous = None
         self._ticks_since_attempt = 0
+        self._ticks_since_change = 0
         self._unstable_failures = 0
+        self._stable_failures = 0
         self._last_decision_stable = True
 
     @property
     def unstable_limit(self) -> int:
         """静止しない画面で次の認識を試みるまでの待ち回数（失敗が続くほど長くなる）。"""
         return min(2**self._unstable_failures, MAX_BACKOFF_TICKS)
+
+    @property
+    def stable_limit(self) -> int:
+        """静止した画面で次の認識を試みるまでの待ち回数。失敗していなければ待たない。"""
+        if self._stable_failures == 0:
+            return 0
+        return min(2**self._stable_failures, MAX_STABLE_BACKOFF_TICKS)
 
     def decide(self, frame_bgr: np.ndarray) -> Decision:
         thumb = _thumbnail(frame_bgr)
@@ -116,10 +130,16 @@ class FrameWatcher:
             self._reference = thumb
             return Decision(recognize=False)
         if frame_difference(self._reference, thumb) < self.change_threshold:
+            self._ticks_since_change = 0
             return Decision(recognize=False)
+        self._ticks_since_change += 1
         stable = previous is not None and (
             frame_difference(previous, thumb) < self.stable_threshold
         )
+        # 静止画面での失敗が続いていれば、画面が変わってから少し待つ（動いていても静止していても）。
+        # 動いている最中の失敗は前回の試行から動いている間だけ待ち、静止した瞬間は待たずに読む
+        if self._ticks_since_change < self.stable_limit:
+            return Decision(recognize=False, stable=stable)
         if not stable and self._ticks_since_attempt < self.unstable_limit:
             return Decision(recognize=False, stable=False)
         region = changed_region(self._reference, thumb)
@@ -134,9 +154,17 @@ class FrameWatcher:
 
     def mark_recognized(self, frame_bgr: np.ndarray, found: bool = True) -> None:
         """認識を実行した結果を反映する。`found` はカードを特定できたか。"""
-        if found or self._last_decision_stable:
+        if found:
             self._reference = _thumbnail(frame_bgr)
+            self._ticks_since_change = 0
             self._unstable_failures = 0
+            self._stable_failures = 0
+        elif self._last_decision_stable:
+            # 静止画面での失敗。基準にして画面が変わるまで再試行しない。続けば次の変化で少し待つ
+            self._reference = _thumbnail(frame_bgr)
+            self._ticks_since_change = 0
+            self._unstable_failures = 0
+            self._stable_failures += 1
         else:
             # 動いている最中の失敗。基準は据え置き、静止したら再度変化として拾う
             self._unstable_failures += 1
@@ -144,7 +172,9 @@ class FrameWatcher:
     def set_reference(self, frame_bgr: np.ndarray) -> None:
         """現在の画面を「認識済み」として基準にする（起動直後など）。"""
         self._reference = _thumbnail(frame_bgr)
+        self._ticks_since_change = 0
         self._unstable_failures = 0
+        self._stable_failures = 0
 
 
 @dataclass(frozen=True)
@@ -227,8 +257,9 @@ class WatchSession:
             if result.ok:
                 return result
             log.info(
-                "高速パスで見つからず通常パイプラインへ: %s timings=%s",
+                "高速パスで見つからず通常パイプラインへ: %s hp_rois=%s timings=%s",
                 result.error,
+                result.hp_badge_rois,
                 {k: round(v) for k, v in result.timings_ms.items()},
             )
         return self._identify(frame)

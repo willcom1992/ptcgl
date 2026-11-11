@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 from rapidfuzz import fuzz
 
-from ptcgl.data.cards import CardRepository, MatchResult
+from ptcgl.data.cards import CardRepository, JapaneseCard, MatchResult
 from ptcgl.data.limitless import CardRef
 from ptcgl.data.sets import find_set, sets_by_official_total
 from ptcgl.recognition.anchor import Anchor, find_anchor, find_number_anchor, to_geoms
@@ -30,6 +30,7 @@ from ptcgl.recognition.ocr import Box, OcrEngine, OcrLine, box_rect, crop_box
 log = logging.getLogger(__name__)
 
 NAME_MATCH_THRESHOLD = 70
+MATCH_CACHE_SIZE = 128  # 照合結果のメモリキャッシュ件数
 OCR_PASS1_WIDTH = 1600
 # 高速パス: 文字検出だけ行い、番号行らしい横長の箱だけ認識する
 # （1 段目は下から 6 個 + 小さい順 6 個、2 段目は残り 6 個が上限）
@@ -87,6 +88,8 @@ class IdentifyResult:
     error: str | None = None
     timings_ms: dict[str, float] = field(default_factory=dict)
     upscale: float = 1.0  # 高速パスで OCR 前に画像を拡大した倍率
+    # 高速パス（全画面）で見つけた HP バッジ候補の数。未評価なら None
+    hp_badge_rois: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -103,6 +106,9 @@ class Pipeline:
         self.repo = repo
         self.ocr = ocr or OcrEngine()
         self.detector = detector  # 設定で手動領域が指定された場合などに使う。None ならアンカー方式
+        # 英語カード → 照合結果のメモリキャッシュ。同じカードを続けて認識したときに
+        # Limitless ページの再解析（約 25 ms）を省く。手動で候補を選び直したら捨てる
+        self._match_cache: dict[CardRef, MatchResult] = {}
 
     # --- 英語カードの特定 ---------------------------------------------------
 
@@ -181,6 +187,13 @@ class Pipeline:
         """セット・番号指定で照合だけ行う（OCR を使わない検証用）。"""
         result = IdentifyResult(en_ref=ref)
         t0 = time.perf_counter()
+        cached = self._match_cache.get(ref)
+        if cached is not None and cached.best is not None and cached.best.image_path is not None:
+            if cached.best.image_path.exists():
+                result.match = cached
+                result.timings_ms["match"] = (time.perf_counter() - t0) * 1000
+                return result
+            self._match_cache.pop(ref, None)  # 画像が消されていたら取り直す
         try:
             match = self.repo.find_japanese(ref)
             if match.best is not None:
@@ -194,11 +207,21 @@ class Pipeline:
                         match.candidates[i] = best
                 match.best = best
             result.match = match
+            if match.best is not None and match.best.image_path is not None:
+                # 画像まで揃った結果だけ覚える（取得に失敗した場合は次回また試す）
+                if len(self._match_cache) >= MATCH_CACHE_SIZE:
+                    self._match_cache.pop(next(iter(self._match_cache)))
+                self._match_cache[ref] = match
         except Exception as exc:
             log.exception("照合に失敗")
             result.error = f"照合に失敗: {exc}"
         result.timings_ms["match"] = (time.perf_counter() - t0) * 1000
         return result
+
+    def confirm(self, en_ref: CardRef, card: JapaneseCard, same_art: bool) -> None:
+        """ユーザーが選んだ日本語版を保存し、その英語カードのキャッシュを捨てる。"""
+        self.repo.confirm(en_ref, card, same_art)
+        self._match_cache.pop(en_ref, None)
 
     def _ocr_downscaled(self, frame_bgr: np.ndarray) -> tuple[list[OcrLine], int, int]:
         h, w = frame_bgr.shape[:2]
@@ -295,7 +318,9 @@ class Pipeline:
             # （小さく表示されたカードは番号が 8px 程度で、全画面の検出では途切れる）。
             # 変化領域に対しては行わない（領域自体を拡大して読むので不要で、失敗時の無駄が大きい）
             t3 = time.perf_counter()
-            for roi in self._hp_badge_rois(frame_bgr, boxes):
+            rois = self._hp_badge_rois(frame_bgr, boxes)
+            result.hp_badge_rois = len(rois)
+            for roi in rois:
                 sub = self.identify_fast(crop(frame_bgr, roi), _depth=1)
                 if sub.ok:
                     for key, value in result.timings_ms.items():
@@ -312,13 +337,8 @@ class Pipeline:
                         )
                     return sub
             result.timings_ms["hp_roi"] = (time.perf_counter() - t3) * 1000
-        if anchor is None and max(h, w) > max_side and _depth == 0:
-            # 縮小検出で小さな番号行を取りこぼした可能性があるため、元解像度で検出し直す
-            # （HP バッジから切り出した領域は拡大済みなので行わない）
-            t2 = time.perf_counter()
-            boxes = self.ocr.detect(frame_bgr)
-            lines, anchor = self._find_number_fast(frame_bgr, boxes, tiers=1)
-            result.timings_ms["detect_native"] = (time.perf_counter() - t2) * 1000
+        # 元解像度での再検出は行わない（常駐ログの集計で約 150 回中 1 回しか成功せず、
+        # 失敗 1 回あたり 0.6 秒を費やしていた。小さな表示は HP バッジ経由の拡大で拾う）
         result.ocr_lines = lines
         if anchor is None:
             result.error = "番号行が見つかりません（高速パス）"
@@ -437,8 +457,15 @@ class Pipeline:
         band_h = int(h * PASS2_BOTTOM_RATIO)
         return card_img[h - band_h :] if band_h >= 16 else card_img
 
-    def identify_frame(self, frame_bgr: np.ndarray, box: CardBox | None = None) -> IdentifyResult:
-        """画面フレーム（またはカード画像）から日本語カードを特定する。"""
+    def identify_frame(
+        self, frame_bgr: np.ndarray, box: CardBox | None = None, native_retry: bool = True
+    ) -> IdentifyResult:
+        """画面フレーム（またはカード画像）から日本語カードを特定する。
+
+        `native_retry` を False にすると、縮小フレームでアンカーが見つからなくても元解像度で
+        全行を読み直さない（約 1.2 秒）。常駐モードでは高速パスが先に小さな表示を拾うため不要で、
+        カードが無い画面での失敗を短くするために使う。
+        """
         result = IdentifyResult()
         t0 = time.perf_counter()
         anchor: Anchor | None = None
@@ -451,7 +478,7 @@ class Pipeline:
             lines, sw, sh = self._ocr_downscaled(frame_bgr)
             result.ocr_lines = lines
             anchor = find_anchor(lines, sw, sh)
-            if anchor is None and frame_bgr.shape[1] > OCR_PASS1_WIDTH:
+            if anchor is None and native_retry and frame_bgr.shape[1] > OCR_PASS1_WIDTH:
                 # 手札ホバーなど小さめの表示では番号が縮小で潰れるため、元解像度で再試行する
                 lines = self.ocr.read(frame_bgr)
                 result.ocr_lines = lines
