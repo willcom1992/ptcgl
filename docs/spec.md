@@ -35,16 +35,34 @@ Pokémon TCG Live（PTCGL）は英語版しか提供されていない。対戦�
 - CPU 負荷: アイドル時 5% 以下（差分がなければ OCR をスキップする）
 - 外部 API へのアクセスはキャッシュ優先で最小化する
 
-## データソース（候補）
+## データソース
 | 用途 | ソース | 備考 |
 | --- | --- | --- |
-| 英語カードDB | [Pokémon TCG API](https://pokemontcg.io/) | 名前・セット・番号・画像 |
-| 多言語カードDB | [TCGdex API](https://tcgdex.dev/) | 日本語を含む多言語対応。画像 URL あり |
-| 日本語公式 | [ポケモンカード公式 カード検索](https://www.pokemon-card.com/card-search/) | 公式画像。スクレイピングは利用規約を要確認 |
+| 英→日対応付け・カード情報 | [Limitless TCG](https://limitlesstcg.com/cards) | API なし。英語カードページの「JP. Prints」と日本語ページの「Int. Prints」を HTML 解析。robots.txt に制限なし |
+| 日本語カード画像 | Limitless の CDN（`limitlesstcg.nyc3.cdn.digitaloceanspaces.com/tpc/...`） | 出典は pokemon-card.com。**個人利用・ローカルキャッシュのみ。再配布しない** |
+| 英語セット表（略号・番号の分母） | [TCGdex API](https://tcgdex.dev/) `/v2/en/sets/{id}` | `scripts/build_en_sets.py` で `en_sets.json` を生成して同梱 |
+| （不採用）英語カードDB | [Pokémon TCG API](https://pokemontcg.io/) | 2027 年 3 月で廃止予定、日本語データなし |
+| （不採用）日本語公式 | [ポケモンカード公式 カード検索](https://www.pokemon-card.com/card-search/) | 公式画像だが規約で複製・配布を禁止。検索も JS 駆動で機械利用に向かない |
 
-**英→日の対応付けは未確定の設計課題。** 英語版と日本語版はセット構成・番号が異なるため、
-カード名（英語→日本語の名称テーブル）＋ワザ名／HP などの属性で照合する方式を第一候補とする。
-決定事項は [architecture.md](architecture.md) に記録する。
+調査結果（2026-11-11）: TCGdex は日本語セットを約 200 件持つが、PTCGL 対応表も英日共通 ID も無く、
+日本語画像の収録率は約 20%（SV10 は 1〜98 のみ、M2a は 0 枚）。`variants_detailed.variantId` は
+仕上げ種別（normal/holo）ごとの ID で、無関係なカード同士で同値になるため照合キーにならない。
+対応付けの方式は [architecture.md](architecture.md) の「日本語版の照合」を参照。
+
+## 環境要件（汎用性）
+- 画面解像度・DPI・モニター数・ウィンドウ位置を固定値にしない。Windows から動的に取得する
+- モニター間で DPI が異なる環境に対応する。設定に保存する領域・位置は比率で持つ
+- 初回起動時に対象ウィンドウとカード領域を設定でき、PC ごとにローカル保存する
+- モニター構成が変わったら再設定を促す
+- PyInstaller で Python・OCR モデルを同梱し、追加インストールなしで起動できる
+
+## 検証マトリクス
+| 解像度 | 倍率 | モニター | モード |
+| --- | --- | --- | --- |
+| フルHD / WQHD / 4K | 100 / 125 / 150 / 200% | 1 枚 / 2 枚（異倍率混在） | ウィンドウ / フルスクリーン |
+
+Phase 0 は基本認識の検証（開発機 1〜2 構成）、Phase 1 で環境差を吸収する仕組みを実装し全構成を計測する。
+結果は `docs/validation-results.md` に記録する。
 
 ## 対象外
 - PTCGL の自動操作・チート行為に当たる機能
