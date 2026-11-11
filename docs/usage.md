@@ -204,7 +204,8 @@ python -m ptcgl identify --set SVI --number 1
 pyinstaller packaging\ptcgl.spec
 ```
 
-`dist\ptcgl\ptcgl.exe` が生成されます。`dist\ptcgl` フォルダごと別の PC にコピーして使えます（Python や OCR モデルは同梱済み）。
+`dist\ptcgl\ptcgl.exe` が生成されます。exe とウィンドウのアイコンは `packaging\ptcgl.ico` と `src\ptcgl\data\icon.png` で、図柄を変えるときは `scriptsuild_icon.py` を編集して実行し直します。
+`dist\ptcgl` フォルダごと別の PC にコピーして使えます（Python や OCR モデルは同梱済み）。
 以下のコマンド例の `python -m ptcgl` は `ptcgl.exe` に読み替えてください。
 exe はコンソールウィンドウを開きません。動作ログは 6 章の `ptcgl.log` に残ります（CLI サブコマンドの結果を画面で見たいときは `python -m ptcgl` を使ってください）。
 

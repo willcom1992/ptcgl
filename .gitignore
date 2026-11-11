@@ -27,6 +27,7 @@ config.local.toml
 !assets/samples/*.jpg
 !docs/images/*.png
 !docs/images/*.jpg
+!src/ptcgl/data/icon.png
 
 # Editor / OS
 .vscode/

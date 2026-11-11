@@ -3,7 +3,8 @@
 
     pyinstaller packaging/ptcgl.spec
 
-RapidOCR の ONNX モデル・設定ファイルと、パッケージ同梱の en_sets.json を含める。
+RapidOCR の ONNX モデル・設定ファイルと、パッケージ同梱の en_sets.json・icon.png を含める。
+exe のアイコンは packaging/ptcgl.ico（scripts/build_icon.py で生成）。
 初回起動時に外部からモデルをダウンロードしない構成にする。
 """
 
@@ -15,7 +16,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 datas = []
 datas += collect_data_files("rapidocr_onnxruntime")  # models/*.onnx, config.yaml
-datas += collect_data_files("ptcgl", includes=["data/*.json"])
+datas += collect_data_files("ptcgl", includes=["data/*.json", "data/*.png"])
 
 binaries = collect_dynamic_libs("onnxruntime")
 # rapidfuzz の C++ 拡張は site-packages/rapidfuzz.libs/ の DLL に依存するが、PyInstaller の
@@ -88,6 +89,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,  # 動作ログは user_data_dir/ptcgl.log に残す（app.configure_file_logging）
+    icon=os.path.join(SPECPATH, "ptcgl.ico"),
 )
 coll = COLLECT(
     exe,

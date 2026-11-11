@@ -24,7 +24,27 @@ def _create_app(argv: list[str]):  # noqa: ANN202
     )
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName("ptcgl")
+    icon = load_app_icon()
+    if icon is not None and isinstance(app, QApplication):
+        app.setWindowIcon(icon)  # タスクバー・タイトルバー・Alt+Tab に出るアイコン
     return app
+
+
+def load_app_icon():  # noqa: ANN201 - QIcon | None（Qt の import を遅らせる）
+    """同梱の icon.png からアイコンを作る。無くても起動は続ける。"""
+    from importlib import resources
+
+    from PySide6.QtGui import QIcon, QPixmap
+
+    try:
+        data = resources.files("ptcgl.data").joinpath("icon.png").read_bytes()
+    except (FileNotFoundError, OSError) as exc:
+        log.warning("アイコンを読み込めません: %s", exc)
+        return None
+    pixmap = QPixmap()
+    if not pixmap.loadFromData(data, "PNG"):
+        return None
+    return QIcon(pixmap)
 
 
 def show_match_window(match, cfg: AppConfig | None = None) -> int:  # noqa: ANN001

@@ -33,6 +33,7 @@ python -m ptcgl windows                                # ウィンドウ一覧�
 python -m ptcgl capture --window "TCG Live" --out shot.png
 python scripts/evaluate.py assets/samples --out docs/validation-results.md
 python scripts/build_en_sets.py                        # セット表の再生成（main に push すると配布済みアプリにも届く）
+python scripts/build_icon.py                           # アプリアイコン（packaging/ptcgl.ico, data/icon.png）の再生成
 
 # テスト・Lint・型チェック
 pytest
@@ -60,8 +61,8 @@ src/ptcgl/
                      # sets.py + en_sets.json（PTCGL セットコードと番号の分母）・cache.py
   ui/                # PySide6 のウィジェット（main_window.py）とワーカースレッド（worker.py）
 tests/               # pytest（fixtures/html に Limitless の保存ページ）
-scripts/             # build_en_sets.py, evaluate.py, detect_spike.py
-packaging/           # PyInstaller spec
+scripts/             # build_en_sets.py, build_icon.py, evaluate.py, detect_spike.py
+packaging/           # PyInstaller spec, ptcgl.ico
 docs/                # 仕様・設計・検証結果
 assets/samples/      # 認識テスト用のスクリーンショットと labels.csv
 ```

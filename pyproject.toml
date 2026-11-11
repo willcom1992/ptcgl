@@ -39,7 +39,7 @@ ptcgl = "ptcgl.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-ptcgl = ["data/*.json"]
+ptcgl = ["data/*.json", "data/*.png"]
 
 [tool.ruff]
 line-length = 100
