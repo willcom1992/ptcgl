@@ -31,7 +31,7 @@
 | `recognition/detector.py` | カード領域検出（Protocol）。輪郭検出実装と手動領域実装 | `CardDetector`, `ContourCardDetector`, `ManualRegionDetector`, `CardBox` |
 | `recognition/ocr.py` | RapidOCR によるテキスト抽出。スレッド数は自動で 2〜4 に抑え、角度分類は使わない | `OcrEngine.read()`, `default_ocr_threads()` |
 | `recognition/card.py` | OCR 結果からカード名・番号・分母・HP を抽出 | `extract_card_info()`, `parse_number_total()` |
-| `data/sets.py` | PTCGL セットコードと番号の分母の表（`en_sets.json`） | `sets_by_official_total()`, `find_set()` |
+| `data/sets.py` | PTCGL セットコードと番号の分母の表（`en_sets.json`）。起動時に最新版を取得して差し替える | `sets_by_official_total()`, `find_set()`, `refresh_en_sets()` |
 | `data/limitless.py` | Limitless カードページの HTML 解析 | `parse_card_page()`, `CardRef`, `CardPage` |
 | `data/cards.py` | 英→日の照合（同一イラスト優先、候補の順位付け） | `CardRepository.find_japanese()` |
 | `data/mapping.py` | 確定した対応付けの保存（SQLite） | `MappingStore` |
@@ -75,6 +75,9 @@
 - パス: `platformdirs` の `user_config_dir("ptcgl")`, `user_data_dir("ptcgl")` のみ。
 - モニター構成: `monitor_fingerprint()` を設定に保存し、変化したら `needs_reconfirm` を立てる。
 - 同梱リソース（`en_sets.json`, RapidOCR モデル）は `importlib.resources` / PyInstaller の datas。
+- セット表の更新: GUI は起動時に別スレッドで `refresh_en_sets()` を呼び、main の `en_sets.json` を
+  `CachedHttpClient` 経由で取得する（1 日 1 回、リトライなし、失敗時は前回の取得分 → 同梱版の順に使う）。
+  取得した表は保存前に形式とセットコードの文字種を検証し、`updated`（生成日時）が同梱版より新しいときだけ採用する。
 
 ## 常駐モードの認識フロー（遅延を抑える仕組み）
 1. **変化領域の特定**（`watch.py`）: 幅 320 px の縮小グレースケールで基準フレームとの差分を取り、
@@ -155,5 +158,6 @@
 | 2026-11-11 | 表示ウィンドウを `WDA_EXCLUDEFROMCAPTURE` でキャプチャから除外する | PTCGL をフルスクリーンにすると表示ウィンドウを重ねざるを得ず、写り込むと OCR が自分の表示を読んでしまう |
 | 2026-11-11 | 画像は個人利用・ローカルキャッシュのみ、再配布しない | pokemon-card.com の規約が複製・配布を禁止している |
 | 2026-11-11 | カード領域は画像処理ではなく OCR アンカー方式で推定する | 輪郭検出・勾配・彩度・色相の 4 方式を試したが、PTCGL の発光枠・丸角・盤面の模様でカード矩形を安定して取れなかった（13 枚中 2 枚）。番号行／HP バッジを手がかりにすると 13 枚中 11 枚で領域を得られた |
+| 2026-11-12 | セット表は同梱に加えて、起動時にリポジトリの main から最新版を取得する | 分母がセット表に無い番号はカードとして採用しないため、新弾が出るたびに約 250 MB の配布物を入れ直す必要があった。表だけなら約 10 KB で、push するだけで全利用者に届く |
 | 2026-11-11 | 番号が隠れる対戦中の詳細表示は Limitless 検索（名前・HP・ワザ名）で特定する | `unique:cards` で同一テキストのカードに絞れる。返るのは代表印刷なので絵柄は未確認扱い |
 | 2026-11-12 | 表示ウィンドウは通常の枠付き・不透明にする（透過しない） | 背景透過を試したが、Windows の Qt ではタイトルバー付きのまま `WA_TranslucentBackground` にすると透過部分が黒く塗られ、枠なしにすると移動・サイズ変更・終了が分かりにくく使いにくかった |

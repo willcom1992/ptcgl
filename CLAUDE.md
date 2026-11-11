@@ -32,7 +32,7 @@ python -m ptcgl -v identify --image shot.png           # 画像から検出→OC
 python -m ptcgl windows                                # ウィンドウ一覧（DPI・矩形）
 python -m ptcgl capture --window "TCG Live" --out shot.png
 python scripts/evaluate.py assets/samples --out docs/validation-results.md
-python scripts/build_en_sets.py                        # セット表の再生成
+python scripts/build_en_sets.py                        # セット表の再生成（main に push すると配布済みアプリにも届く）
 
 # テスト・Lint・型チェック
 pytest
@@ -71,6 +71,7 @@ assets/samples/      # 認識テスト用のスクリーンショットと label
 - 画面座標は mss の物理ピクセルで扱い、保存する領域・位置は対象ウィンドウ／モニターに対する比率
 - `recognition/detector.py`（領域検出）と `recognition/ocr.py`（文字認識）は互いに依存しない
 - 外部サイトへのアクセスは `data/cache.py` 経由のみ（1 req/s、永続キャッシュ、プリフェッチ禁止）
+- セット表（`en_sets.json`）は起動時に main の最新版を 1 日 1 回取得する（`data/sets.py` の `refresh_en_sets()`）。形式を変えるときは配布済みアプリが読めることを保つ
 
 ## コーディング規約
 - Python 3.10 互換。`X | None` 記法を使うファイルには `from __future__ import annotations` を付ける

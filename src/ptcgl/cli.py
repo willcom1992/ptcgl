@@ -53,10 +53,12 @@ def _parse_region(text: str | None):  # noqa: ANN202
 
 def cmd_identify(args: argparse.Namespace) -> int:
     from ptcgl.data.limitless import CardRef
+    from ptcgl.data.sets import refresh_en_sets
 
     cfg = load_config()
     pipeline, http = build_services(cfg)
     try:
+        refresh_en_sets(http)  # GUI と同じく最新のセット表で照合する（1 日 1 回だけ取得）
         if args.set and args.number:
             number = args.number.upper().lstrip("0") or "0"
             result = pipeline.identify_ref(CardRef("en", args.set.upper(), number))

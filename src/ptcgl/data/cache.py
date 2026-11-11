@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -52,12 +53,18 @@ class CachedHttpClient:
             time.sleep(wait)
         self._last_request_at = time.monotonic()
 
-    def _fetch(self, url: str) -> bytes:
+    def _fetch(
+        self, url: str, max_retries: int | None = None, timeout: float | None = None
+    ) -> bytes:
+        retries = self.max_retries if max_retries is None else max_retries
         last_error: Exception | None = None
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(retries + 1):
             self._throttle()
             try:
-                response = self._client.get(url)
+                if timeout is None:
+                    response = self._client.get(url)
+                else:
+                    response = self._client.get(url, timeout=timeout)
                 if response.status_code == 404:
                     response.raise_for_status()
                 if response.status_code >= 500 or response.status_code == 429:
@@ -71,16 +78,29 @@ class CachedHttpClient:
                 last_error = exc
             except httpx.TransportError as exc:
                 last_error = exc
-            if attempt < self.max_retries:
+            if attempt < retries:
                 time.sleep(1.0 * (attempt + 1))
         assert last_error is not None
         raise last_error
 
-    def get_bytes(self, url: str, max_age: float | None = None) -> bytes:
+    def get_bytes(
+        self,
+        url: str,
+        max_age: float | None = None,
+        *,
+        stale_if_error: bool = False,
+        max_retries: int | None = None,
+        timeout: float | None = None,
+        validate: Callable[[bytes], object] | None = None,
+    ) -> bytes:
         """キャッシュがあればそれを、無ければ取得して保存してから返す。
 
         `max_age`（秒）を指定すると、それより古いキャッシュは取り直す（HTML ページ向け。
-        画像は不変なので None でよい）。
+        画像は不変なので None でよい）。`stale_if_error` を指定すると、取り直しに失敗したとき
+        期限切れのキャッシュを返す（オフラインでも前回の内容で動かすため）。
+        `max_retries` と `timeout` はこの呼び出しに限った値（省略時はクライアントの既定）。
+        `validate` は取得した内容を保存する前に呼ばれ、ValueError を投げると取得失敗として扱う
+        （不正な応答で正常なキャッシュを上書きしないため）。
         """
         path = self._path_for(url)
         if path.exists() and not self._expired(path, max_age):
@@ -88,7 +108,14 @@ class CachedHttpClient:
         with self._lock:
             if path.exists() and not self._expired(path, max_age):
                 return path.read_bytes()
-            content = self._fetch(url)
+            try:
+                content = self._fetch(url, max_retries, timeout)
+                if validate is not None:
+                    validate(content)
+            except (httpx.HTTPError, ValueError):
+                if stale_if_error and path.exists():
+                    return path.read_bytes()
+                raise
             tmp = path.with_suffix(".tmp")
             tmp.write_bytes(content)
             tmp.replace(path)

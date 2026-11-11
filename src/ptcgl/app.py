@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 
 from ptcgl.config import AppConfig, load_config, save_config
 
@@ -68,6 +69,24 @@ def _log_uncaught(exc_type, exc, tb) -> None:  # noqa: ANN001
     sys.__excepthook__(exc_type, exc, tb)
 
 
+def start_sets_refresh(http) -> threading.Thread:  # noqa: ANN001
+    """最新のセット表を裏で取得する（新弾のたびにアプリを配り直さなくて済むように）。
+
+    取得が終わるまで起動も認識も待たせない。失敗しても同梱の表で動き続ける。
+    """
+    from ptcgl.data.sets import refresh_en_sets
+
+    def run() -> None:
+        try:
+            refresh_en_sets(http)
+        except Exception:  # 終了処理と重なった場合など。セット表の更新失敗でアプリを落とさない
+            log.exception("セット表の更新に失敗")
+
+    thread = threading.Thread(target=run, name="sets-refresh", daemon=True)
+    thread.start()
+    return thread
+
+
 def main(argv: list[str] | None = None) -> int:
     """常駐モードでアプリケーションを起動し、終了コードを返す。
 
@@ -93,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("モニター構成を取得できません: %s", exc)
 
     pipeline, http = build_services(cfg)
+    sets_refresh = start_sets_refresh(http)
     worker = RecognitionWorker(pipeline, cfg)
     thread = WorkerThread(worker)
 
@@ -109,9 +129,10 @@ def main(argv: list[str] | None = None) -> int:
         code = app.exec()
     finally:
         save_config(window.config)
-        if thread.shutdown():
+        sets_refresh.join(timeout=1.0)
+        if thread.shutdown() and not sets_refresh.is_alive():
             http.close()
         else:
-            # ワーカーがまだ動いている間に共有リソースを閉じると例外になるため、閉じずに終了する
-            log.warning("ワーカーが終了しないため HTTP クライアントを閉じずに終了します")
+            # まだ動いているスレッドがある間に共有リソースを閉じると例外になるため、閉じずに終了する
+            log.warning("通信中のスレッドが終了しないため HTTP クライアントを閉じずに終了します")
     return code

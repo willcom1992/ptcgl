@@ -7,7 +7,9 @@
 対象シリーズ（SWSH 以降）の各セット詳細 `/v2/en/sets/{id}` を取得する。取得結果は
 --cache-dir に保存し、再実行時はネットワークを使わない。
 
-出力行: code（PTCGL のセットコード）, tcgdex_id, name, official（番号の分母）, total。
+出力: {"updated": 生成日時（UTC）, "sets": [...]}。sets の各行は code（PTCGL のセットコード）,
+tcgdex_id, name, official（番号の分母）, total。配布済みのアプリは起動時に main のこのファイルを
+取得し、updated が同梱版より新しければ差し替える（形式は src/ptcgl/data/sets.py が検証する）。
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import json
 import sys
 import time
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 API_BASE = "https://api.tcgdex.net/v2/en/sets"
@@ -97,7 +100,8 @@ def main(argv: list[str] | None = None) -> int:
     details = [load_set_detail(set_id, args.cache_dir) for set_id in target_ids]
     rows = build(details)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    doc = {"updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "sets": rows}
+    args.out.write_bytes((json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
     print(f"{len(rows)} sets -> {args.out}", file=sys.stderr)
     return 0
 
