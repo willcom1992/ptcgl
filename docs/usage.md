@@ -39,7 +39,7 @@ Python などを別途インストールする必要はありません。
 2. いちばん上にある最新版の「Assets」を開き、`ptcgl-windows.zip` をクリックしてダウンロードします。
 3. ダウンロードした zip を右クリック →「すべて展開」を押します。`ptcgl` という名前のフォルダができ、中に `ptcgl.exe` が入っています。
 
-zip は数百 MB あります（文字認識のモデルと実行環境が入っているため）。
+zip は約 100 MB、展開後は約 250 MB あります（文字認識のモデルと実行環境が入っているため）。
 開発者や、自分でソースコードから exe を作りたい人は 7 章を参照してください。
 
 **置き方**
@@ -211,7 +211,7 @@ Compress-Archive -Path dist\ptcgl -DestinationPath ptcgl-windows.zip
 gh release create v0.1.0 ptcgl-windows.zip --title "v0.1.0" --notes "変更点"
 ```
 
-> 注意: `dist\ptcgl` は約 350 MB あります。zip にはキャッシュ済みのカード画像を含めないでください（画像は個人利用のみ。ビルド直後の `dist\ptcgl` には含まれていません）。
+> 注意: `dist\ptcgl` は約 250 MB（zip で約 100 MB）あります。使わない Qt モジュールや OpenCV の動画機能は spec 内の `_DROP_PATTERNS` で除外しています。zip にはキャッシュ済みのカード画像を含めないでください（画像は個人利用のみ。ビルド直後の `dist\ptcgl` には含まれていません）。
 
 ---
 

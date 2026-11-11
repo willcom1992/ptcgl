@@ -35,9 +35,46 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "torch", "torchvision", "matplotlib", "IPython"],
+    excludes=[
+        "tkinter", "torch", "torchvision", "matplotlib", "IPython",
+        # 使わない Qt モジュール（QML/Quick/Network/Pdf/WebEngine 等）。DLL は下の _drop で落とす
+        "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtNetwork",
+        "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
+        "PySide6.QtWebChannel", "PySide6.QtMultimedia", "PySide6.QtOpenGLWidgets", "PySide6.QtSql",
+        "PySide6.QtTest", "PySide6.QtXml", "PySide6.QtSvg", "PySide6.QtSvgWidgets", "PySide6.QtPrintSupport",
+        # Pillow の AVIF プラグイン（7.5 MB）。rapidocr は PIL.Image しか使わない
+        "PIL._avif",
+    ],
     noarchive=False,
 )
+
+# 配布サイズ削減: アプリが使わないバイナリ・データを Analysis 結果から取り除く。
+# ここで落とすものは実行時に参照されない（検証: identify --set/--number と GUI 起動）。
+_DROP_PATTERNS = (
+    "opengl32sw.dll",  # ソフトウェア OpenGL（QtWidgets のみの GUI では不要）
+    "qt6quick", "qt6qml", "qt6virtualkeyboard", "qtvirtualkeyboardplugin",  # QML/仮想キーボード
+    "qt6network", "qnetworklistmanager", "plugins/tls/",  # Qt の通信層（HTTP は httpx を使う）
+    "qt6pdf", "qpdf.dll",  # PDF
+    "qt6svg", "qsvg.dll", "qsvgicon.dll",  # SVG（PNG しか表示しない）
+    "pyside6/translations/",  # Qt の翻訳（ダイアログも独自文言）
+    "opencv_videoio_ffmpeg",  # 動画入出力（headless でも同梱される）
+    "pil/_avif",  # Pillow の AVIF プラグイン
+)
+
+
+def _drop(entries):
+    kept = []
+    for entry in entries:
+        name = entry[0].replace("\\", "/").lower()  # パス区切りを / に揃えて照合
+        if any(pat in name for pat in _DROP_PATTERNS):
+            continue
+        kept.append(entry)
+    return kept
+
+
+a.binaries = _drop(a.binaries)
+a.datas = _drop(a.datas)
+
 pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
