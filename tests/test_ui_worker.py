@@ -36,16 +36,22 @@ class _FakePipeline:
     def __init__(self) -> None:
         self.repo = _FakeRepo()
         self.calls = 0
+        self.frame_calls = 0
 
     def identify_frame(
         self, frame: np.ndarray, box=None, native_retry: bool = True
     ) -> IdentifyResult:  # noqa: ANN001
-        self.calls += 1
+        self.frame_calls += 1
         assert native_retry is False  # 常駐モードでは元解像度の読み直しを省く
         return IdentifyResult(en_ref=CardRef("en", "MEG", "76"), match=_match())
 
-    def identify_fast(self, frame: np.ndarray, full_frame: bool = False) -> IdentifyResult:
-        return IdentifyResult(error="番号行が見つかりません（高速パス）")
+    def identify_fast(
+        self, frame: np.ndarray, full_frame: bool = False, cancel=None
+    ) -> IdentifyResult:  # noqa: ANN001
+        if not full_frame:
+            return IdentifyResult(error="番号行が見つかりません（高速パス）")
+        self.calls += 1
+        return IdentifyResult(en_ref=CardRef("en", "MEG", "76"), match=_match())
 
     def identify_ref(self, ref: CardRef) -> IdentifyResult:
         return IdentifyResult(en_ref=ref, match=_match())
@@ -84,6 +90,7 @@ def test_worker_emits_window_then_result(qtbot, monkeypatch) -> None:  # noqa: A
     w._tick()
     assert len(results) == 1 and results[0].ok
     assert pipeline.calls == 1
+    assert pipeline.frame_calls == 0  # 手動領域の設定が無ければ通常パイプラインは使わない
     assert statuses[-1] == "監視中"
 
 
@@ -109,12 +116,10 @@ def test_worker_confirm_delegates_to_repository(qtbot, monkeypatch) -> None:  # 
 def test_worker_emits_fixed_status_on_failed_recognition(qtbot, monkeypatch) -> None:  # noqa: ANN001
     pipeline = _FakePipeline()
 
-    def fail(frame, box=None, native_retry=True):  # noqa: ANN001, ANN202
-        return IdentifyResult(
-            error="拡大表示されたカードが見つかりません（番号・HP のいずれも検出できず）"
-        )
+    def fail(frame, full_frame=False, cancel=None):  # noqa: ANN001, ANN202
+        return IdentifyResult(error="番号行が見つかりません（高速パス）")
 
-    pipeline.identify_frame = fail  # type: ignore[method-assign]
+    pipeline.identify_fast = fail  # type: ignore[method-assign]
     frame = np.full((8, 8, 3), 50, dtype=np.uint8)
     changed = np.full((8, 8, 3), 200, dtype=np.uint8)
     w = _worker(monkeypatch, pipeline, [frame, changed])

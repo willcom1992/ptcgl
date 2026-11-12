@@ -28,6 +28,7 @@ _NUMBER_LINE_RE = re.compile(
 # 分母の無い番号（基本エネルギー）: "MEE EN 006", "MEEEN006"
 _NUMBER_NO_TOTAL_RE = re.compile(r"(?P<set>[A-Z]{2,4})\s*EN\s*(?P<number>\d{3})(?!\d|/)")
 _HP_BADGE_RE = re.compile(r"^\d{2,3}$")
+HP_BADGE_MIN_HEIGHT = 0.035  # HP バッジとみなす数字の最小の高さ（フレーム高さ比）
 _ALPHA_RE = re.compile(r"[A-Za-z]{3,}")
 
 # 番号テキストの高さに対するカード全体の高さ（PTCGL の描画で実測: 21〜24 倍）
@@ -95,6 +96,11 @@ def _clamp_box(x: float, y: float, w: float, h: float, conf: float) -> CardBox:
     return CardBox(x0, y0, max(x1 - x0, 0.01), max(y1 - y0, 0.01), conf)
 
 
+def is_hp_badge_text(text: str) -> bool:
+    """HP バッジの文字列（2〜3 桁の数字だけ）か。"""
+    return bool(_HP_BADGE_RE.match(text.strip()))
+
+
 def find_number_anchor(geoms: list[LineGeom], frame_aspect: float) -> Anchor | None:
     """番号行（NNN/TTT）を探し、そこからカード領域を推定する。"""
     # (行高, 行, セットコード, 番号, 分母, 接頭辞)
@@ -154,7 +160,7 @@ def find_number_anchor(geoms: list[LineGeom], frame_aspect: float) -> Anchor | N
 
 def find_hp_badge_anchor(geoms: list[LineGeom], frame_aspect: float) -> Anchor | None:
     """最も大きい数字（HP バッジ）と、その左にある名前行からカード領域を推定する。"""
-    digits = [g for g in geoms if _HP_BADGE_RE.match(g.text.strip()) and g.h >= 0.035]
+    digits = [g for g in geoms if is_hp_badge_text(g.text) and g.h >= HP_BADGE_MIN_HEIGHT]
     if not digits:
         return None
     hp_g = max(digits, key=lambda g: g.h)

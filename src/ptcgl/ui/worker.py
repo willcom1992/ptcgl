@@ -44,12 +44,19 @@ class RecognitionWorker(QObject):
         self._stopping = False
         self._last_window_key: tuple | None = ()
         self._capture = ScreenCapture()
+        # 高速パスが全行認識と同じ範囲を読むので、通常パイプラインは設定で手動領域が指定された
+        # ときだけ最終手段として残す（元解像度の読み直しは省き、失敗を短くする）
+        manual_region = (
+            config.capture.detection_mode == "manual" and config.capture.manual_box() is not None
+        )
+        identify = (
+            partial(self._pipeline.identify_frame, native_retry=False) if manual_region else None
+        )
         self._session = WatchSession(
             find_window=self._find,
             refresh_window=self._refresh,
             grab=self._capture.grab,
-            # 高速パスが先に走るので、通常パイプラインでは元解像度の読み直しを省く（失敗を短くする）
-            identify=partial(self._pipeline.identify_frame, native_retry=False),
+            identify=identify,
             identify_fast=self._pipeline.identify_fast,
             watcher=FrameWatcher(
                 change_threshold=config.capture.change_threshold,
@@ -160,17 +167,27 @@ class RecognitionWorker(QObject):
         if event.kind == "result" and event.result is not None:
             r = event.result
             log.info(
-                "認識 %.0fms ok=%s en=%s region=%s timings=%s error=%s",
+                "認識 %.0fms ok=%s en=%s region=%s stable=%s timings=%s error=%s",
                 event.elapsed_ms,
                 r.ok,
                 r.en_ref,
                 f"{event.region.rw * event.region.rh:.2f}" if event.region else "full",
+                event.stable,
                 {k: round(v) for k, v in r.timings_ms.items()},
                 r.error,
             )
             self.result_ready.emit(event.result)
             # 画面には操作に関わる状態だけを出す。秒数や失敗理由はログファイルに残す
             self.status_changed.emit("監視中" if event.result.ok else "カードを特定できません")
+        elif event.kind == "aborted":
+            timings = event.result.timings_ms if event.result is not None else {}
+            log.info(
+                "認識を中断 %.0fms（画面が変化）stable=%s timings=%s",
+                event.elapsed_ms,
+                event.stable,
+                {k: round(v) for k, v in timings.items()},
+            )
+            self.status_changed.emit("監視中")
         elif event.kind in ("no_window", "minimized", "error"):
             self.status_changed.emit(event.message)
 

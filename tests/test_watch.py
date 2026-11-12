@@ -5,7 +5,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
+from ptcgl import watch as watch_mod
 from ptcgl.capture.window import WindowInfo
 from ptcgl.pipeline import IdentifyResult
 from ptcgl.recognition.detector import CardBox
@@ -18,6 +20,15 @@ from ptcgl.watch import (
     changed_region,
     frame_difference,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_cancel_recapture(monkeypatch) -> None:  # noqa: ANN001
+    """既定では中断判定の撮り直しを行わない（テストの所要時間に結果が左右されないように）。
+
+    中断を試すテストは自分で CANCEL_CHECK_INTERVAL_S を 0 に上書きする。
+    """
+    monkeypatch.setattr(watch_mod, "CANCEL_CHECK_INTERVAL_S", 1e9)
 
 
 def _frame(value: int, size: tuple[int, int] = (720, 1280)) -> np.ndarray:
@@ -260,16 +271,16 @@ def test_session_region_hit_skips_full_frame() -> None:
     assert s.step().kind == "idle"
 
 
-def test_session_always_falls_back_to_full_ocr_after_fast_path() -> None:
-    # 高速パスの HP バッジ候補が 0 でも通常パイプラインは省かない
-    # （高速パスの候補条件は通常パイプラインのアンカー判定より狭く、取りこぼす恐れがある）
+def test_session_falls_back_to_full_ocr_when_identify_is_given() -> None:
+    # 通常パイプラインが渡されていれば（手動領域の設定時）、高速パスの後に最終手段として呼ぶ
     fake = _Fake()
     fast_calls: list[bool] = []
 
-    def identify_fast(frame: np.ndarray, full_frame: bool = False) -> IdentifyResult:
+    def identify_fast(frame: np.ndarray, full_frame: bool = False, cancel=None) -> IdentifyResult:  # noqa: ANN001
         fast_calls.append(full_frame)
         res = IdentifyResult(error="番号行が見つかりません（高速パス）")
         if full_frame:
+            assert cancel is not None  # 全画面の高速パスには中断判定を渡す
             res.hp_badge_rois = 0
         return res
 
@@ -280,6 +291,76 @@ def test_session_always_falls_back_to_full_ocr_after_fast_path() -> None:
     assert ev.kind == "result" and ev.result is not None and not ev.result.ok
     assert fast_calls == [False, True]  # 変化領域 → 全画面
     assert fake.identify_calls == [(720, 1280)]
+
+
+def test_session_without_identify_stops_after_fast_path() -> None:
+    # 常駐モードの既定: 高速パスが全行認識と同じ範囲を読むので通常パイプラインは呼ばない
+    fake = _Fake()
+    fast_calls: list[bool] = []
+
+    def identify_fast(frame: np.ndarray, full_frame: bool = False, cancel=None) -> IdentifyResult:  # noqa: ANN001
+        fast_calls.append(full_frame)
+        return IdentifyResult(error="番号行が見つかりません（高速パス）")
+
+    fake.frames = [_frame(40), _frame_with_card(40, 220)]
+    s = WatchSession(fake.find, fake.refresh, fake.grab, None, identify_fast=identify_fast)
+    s.step()
+    ev = s.step()
+    assert ev.kind == "result" and ev.result is not None and not ev.result.ok
+    assert fast_calls == [False, True]
+    assert fake.identify_calls == []
+    with pytest.raises(ValueError):
+        WatchSession(fake.find, fake.refresh, fake.grab, None)
+
+
+def test_session_aborts_when_screen_changes_during_recognition(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(watch_mod, "CANCEL_CHECK_INTERVAL_S", 0.0)
+    fake = _Fake()
+    full_calls = 0
+
+    def identify_fast(frame: np.ndarray, full_frame: bool = False, cancel=None) -> IdentifyResult:  # noqa: ANN001
+        nonlocal full_calls
+        if full_frame:
+            full_calls += 1
+            if cancel():
+                return IdentifyResult(error="画面が変わったため中断", cancelled=True)
+        return IdentifyResult(error="番号行が見つかりません（高速パス）")
+
+    # 基準 → カード出現（認識開始）→ 変化領域で失敗した直後の撮り直しで画面が大きく変わっている
+    fake.frames = [_frame(40), _frame_with_card(40, 220), _frame(200)]
+    s = WatchSession(fake.find, fake.refresh, fake.grab, None, identify_fast=identify_fast)
+    s.step()
+    ev = s.step()
+    assert ev.kind == "aborted" and ev.result is not None and ev.result.cancelled
+    assert full_calls == 0  # 全画面の高速パスに進む前に打ち切った
+    assert not fake.frames
+
+    # 打ち切りは動いている最中の失敗と同じく試行間隔を延ばす（演出中に OCR が毎ティック走らない）。
+    # ただし基準は据え置きで、静止した画面は間隔に関係なく再び「変化」として読む
+    # （撮り直し 2 回分も同じ画面なので中断しない）
+    assert s.watcher.unstable_limit == 2
+    card = _frame_with_card(40, 220)
+    fake.frames = [card, card, card]
+    ev = s.step()
+    assert ev.kind == "result" and full_calls == 1
+    assert s.watcher.unstable_limit == 1  # 認識できたら元に戻る
+
+
+def test_session_aborts_between_fast_path_and_full_pipeline(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(watch_mod, "CANCEL_CHECK_INTERVAL_S", 0.0)
+    fake = _Fake()
+
+    def identify_fast(frame: np.ndarray, full_frame: bool = False, cancel=None) -> IdentifyResult:  # noqa: ANN001
+        return IdentifyResult(error="番号行が見つかりません（高速パス）")
+
+    # 変化領域の後の撮り直しは同じ画面、全画面の高速パスの後の撮り直しで変わっている
+    card = _frame_with_card(40, 220)
+    fake.frames = [_frame(40), card, card, _frame(200)]
+    s = WatchSession(fake.find, fake.refresh, fake.grab, fake.identify, identify_fast=identify_fast)
+    s.step()
+    ev = s.step()
+    assert ev.kind == "aborted"
+    assert fake.identify_calls == []  # 通常パイプラインは呼ばれない
 
 
 def test_session_resets_watcher_when_window_is_replaced() -> None:

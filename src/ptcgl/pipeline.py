@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import cv2
@@ -22,9 +24,17 @@ from rapidfuzz import fuzz
 from ptcgl.data.cards import CardRepository, JapaneseCard, MatchResult
 from ptcgl.data.limitless import CardRef
 from ptcgl.data.sets import find_set, sets_by_official_total
-from ptcgl.recognition.anchor import Anchor, find_anchor, find_number_anchor, to_geoms
+from ptcgl.recognition.anchor import (
+    HP_BADGE_MIN_HEIGHT,
+    Anchor,
+    find_anchor,
+    find_hp_badge_anchor,
+    find_number_anchor,
+    is_hp_badge_text,
+    to_geoms,
+)
 from ptcgl.recognition.card import LABEL_WORDS, RecognizedCard, extract_card_info
-from ptcgl.recognition.detector import CARD_ASPECT, CardBox, CardDetector, crop
+from ptcgl.recognition.detector import CARD_ASPECT, CardBox, CardDetector, crop, to_frame_box
 from ptcgl.recognition.ocr import Box, OcrEngine, OcrLine, box_rect, crop_box
 
 log = logging.getLogger(__name__)
@@ -33,13 +43,14 @@ NAME_MATCH_THRESHOLD = 70
 MATCH_CACHE_SIZE = 128  # 照合結果のメモリキャッシュ件数
 OCR_PASS1_WIDTH = 1600
 # 高速パス: 文字検出だけ行い、番号行らしい横長の箱だけ認識する
-# （1 段目は下から 6 個 + 小さい順 6 個、2 段目は残り 6 個が上限）
+# （1 段目は下から 6 個 + 小さい順 6 個、2 段目は残り 6 個が上限、3 段目は残りの箱すべて）
 FAST_TIER1_BOXES = 6
 FAST_MAX_NAME_BOXES = 6
 FAST_NUMBER_MIN_ASPECT = 2.5
 FAST_NUMBER_MAX_ASPECT = 12.0  # 1 段目はこれより横長の行（説明文）を除外。認識は幅に比例して遅い
 FAST_TIER2_MAX_ASPECT = 16.0
 FAST_TIER2_BOXES = 6
+FAST_TIER3_MAX_BOXES = 40  # 3 段目（残りすべて）の上限。全画面の検出は WQHD の盤面で 10〜50 箱
 FAST_NUMBER_MAX_HEIGHT = 0.035  # 番号行は小さい（画像高さに対する比率）。最低 20px
 FAST_DET_MAX_SIDE_REGION = 960  # 変化領域（カード 1 枚程度）の検出は縮小して行う
 FAST_DET_MAX_SIDE_FRAME = 1600  # 全画面
@@ -54,6 +65,13 @@ FAST_HP_MAX_ASPECT = 12.0  # 名前バーと結合した箱も拾う
 FAST_HP_MAX_TRIES = 2
 FAST_HP_CARD_HEIGHT_RATIO = 18.0
 FAST_HP_MAX_CANDIDATES = 16
+FAST_HP_NAME_MAX_GAP = 0.25  # 名前行の右端から HP バッジまでの最大間隔（フレーム幅比）
+# 失敗した HP バッジ領域の記憶（位置の許容差は比率、見た目の差は縮小グレースケールの平均絶対差分）
+FAILED_ROI_CACHE_SIZE = 8
+FAILED_ROI_TTL_S = 60.0  # これより古い記憶は使わない（盤面はターンごとに変わる）
+FAILED_ROI_POS_TOLERANCE = 0.01
+FAILED_ROI_MAX_DIFF = 10.0
+FAILED_ROI_THUMB_SIZE = (24, 32)
 # 2〜3 桁の数字で終わる（HP バッジ）。"39:00" のタイマーや "076/132" の番号は除く
 _TRAILING_HP_RE = re.compile(r"(?<![\d/:])(\d{2,3})\s*$")
 # パス 2 はまず領域の下帯（セットコード・番号がある）だけを OCR し、セットコードで確定できたら
@@ -90,6 +108,14 @@ class IdentifyResult:
     upscale: float = 1.0  # 高速パスで OCR 前に画像を拡大した倍率
     # 高速パス（全画面）で見つけた HP バッジ候補の数。未評価なら None
     hp_badge_rois: int | None = None
+    cancelled: bool = False  # 呼び出し側の要求で途中で打ち切った（画面が変わった）
+
+    ABORT_MESSAGE = "画面が変わったため中断"
+
+    @classmethod
+    def aborted(cls) -> IdentifyResult:
+        """呼び出し側の要求で打ち切ったことを表す結果。"""
+        return cls(error=cls.ABORT_MESSAGE, cancelled=True)
 
     @property
     def ok(self) -> bool:
@@ -109,6 +135,10 @@ class Pipeline:
         # 英語カード → 照合結果のメモリキャッシュ。同じカードを続けて認識したときに
         # Limitless ページの再解析（約 25 ms）を省く。手動で候補を選び直したら捨てる
         self._match_cache: dict[CardRef, MatchResult] = {}
+        # (領域, 縮小グレースケール, 記録時刻)
+        self._failed_rois: deque[tuple[CardBox, np.ndarray, float]] = deque(
+            maxlen=FAILED_ROI_CACHE_SIZE
+        )
 
     # --- 英語カードの特定 ---------------------------------------------------
 
@@ -249,9 +279,37 @@ class Pipeline:
 
     # --- 高速パス -------------------------------------------------------------
 
+    def _read_boxes(
+        self, frame_bgr: np.ndarray, boxes: list[Box], read: dict[Box, OcrLine | None]
+    ) -> list[OcrLine]:
+        """まだ読んでいない箱だけをまとめて認識し、読めた行を返す。結果は `read` に記録する。"""
+        todo = [b for b in boxes if b not in read]
+        if not todo:
+            return []
+        texts = self.ocr.recognize([crop_box(frame_bgr, b) for b in todo])
+        out: list[OcrLine] = []
+        for b, (t, c) in zip(todo, texts, strict=True):
+            line = OcrLine(text=t, confidence=c, box=b) if t else None
+            read[b] = line
+            if line is not None:
+                out.append(line)
+        return out
+
+    @staticmethod
+    def _lines(read: dict[Box, OcrLine | None], reading_order: bool = False) -> list[OcrLine]:
+        """読めた行。`reading_order` なら上から下・左から右に並べる（全行認識と同じ順）。"""
+        lines = [ln for ln in read.values() if ln is not None]
+        if reading_order:
+            lines.sort(key=lambda ln: (box_rect(ln.box)[1], box_rect(ln.box)[0]))
+        return lines
+
     def _find_number_fast(
-        self, frame_bgr: np.ndarray, boxes: list[Box], tiers: int = 2
-    ) -> tuple[list[OcrLine], Anchor | None]:
+        self,
+        frame_bgr: np.ndarray,
+        boxes: list[Box],
+        read: dict[Box, OcrLine | None],
+        tiers: int = 2,
+    ) -> Anchor | None:
         """検出した箱のうち番号行らしいものから順に認識し、番号アンカーを探す。
 
         1 段目: 小さく横長（説明文ほど長くない）な箱を下から最大 6 個。ここで大半は決まる
@@ -281,30 +339,43 @@ class Pipeline:
             for _, a, b in sorted(small, key=lambda t: -t[0])
             if b not in tier1 and a <= FAST_TIER2_MAX_ASPECT
         ][:FAST_TIER2_BOXES]
-        lines: list[OcrLine] = []
         for tier in (tier1, tier2)[:tiers]:
             if not tier:
                 continue
-            texts = self.ocr.recognize([crop_box(frame_bgr, b) for b in tier])
-            lines.extend(
-                OcrLine(text=t, confidence=c, box=b)
-                for b, (t, c) in zip(tier, texts, strict=True)
-                if t
-            )
-            anchor = find_number_anchor(to_geoms(lines, w, h), w / h)
+            self._read_boxes(frame_bgr, tier, read)
+            anchor = find_number_anchor(to_geoms(self._lines(read), w, h), w / h)
             if anchor is not None:
-                return lines, anchor
-        return lines, None
+                return anchor
+        return None
+
+    @staticmethod
+    def _cancelled(cancel: Callable[[], bool] | None, result: IdentifyResult) -> bool:
+        """呼び出し側（常駐モード）が中断を求めていれば結果に印を付けて True。"""
+        if cancel is not None and cancel():
+            result.cancelled = True
+            result.error = IdentifyResult.ABORT_MESSAGE
+            return True
+        return False
 
     def identify_fast(
-        self, frame_bgr: np.ndarray, full_frame: bool = False, _depth: int = 0
+        self,
+        frame_bgr: np.ndarray,
+        full_frame: bool = False,
+        cancel: Callable[[], bool] | None = None,
+        _depth: int = 0,
     ) -> IdentifyResult:
-        """文字検出 + 選択的な認識で、番号行が見えるカードを最短で特定する。
+        """文字検出 + 選択的な認識で、画面のカードを最短で特定する（常駐モードの主経路）。
 
-        全行を認識する通常のパイプラインに比べて 3〜5 倍速い。番号が隠れる対戦中の詳細表示は
-        扱えないので、失敗したら呼び出し側で identify_frame() にフォールバックする。
-        `full_frame` が True（画面全体）で番号行が読めないときは HP バッジ（大きな数字）から
-        カード領域を推定し、そこを拡大して再試行する。
+        文字検出は 1 回だけ行い、箱を「番号行らしい順」に少しずつ認識する。
+        1. 番号行（1〜2 段目: 小さく横長の箱）→ セットコード・分母で英語カードを確定
+        2. `full_frame`（画面全体）のときだけ:
+           a. HP バッジアンカー: 大きな 2〜3 桁の数字とその左の名前行から、名前・HP・ワザ名で検索
+              （番号が隠れる対戦中の詳細表示）
+           b. HP バッジ（小さな表示も含む）の右端からカード領域を推定し、拡大して番号を読み直す
+              （画面幅の 2 割程度の手札ホバーは番号が 8px で全画面の検出では途切れる）
+           c. 3 段目: 残りの箱をすべて認識して番号行を探す（通常パイプラインの全行認識と同じ範囲）
+        `cancel` は段階の切れ目で呼ばれ、True を返すと残りを省いて `cancelled` 付きの結果を返す
+        （画面が変わってしまった古いフレームに時間を使わないため）。番号行の 1〜2 段目は中断しない。
         """
         result = IdentifyResult()
         h, w = frame_bgr.shape[:2]
@@ -324,38 +395,65 @@ class Pipeline:
         t0 = time.perf_counter()
         boxes = self.ocr.detect(frame_bgr, max_side=max_side)
         result.timings_ms["detect"] = (time.perf_counter() - t0) * 1000
+        read: dict[Box, OcrLine | None] = {}
         t1 = time.perf_counter()
-        lines, anchor = self._find_number_fast(frame_bgr, boxes)
+        anchor = self._find_number_fast(frame_bgr, boxes, read)
         result.timings_ms["ocr_number"] = (time.perf_counter() - t1) * 1000
+        fallback_error: str | None = None
         if anchor is None and _depth == 0 and full_frame:
-            # 全画面で番号行が読めない: HP バッジからカード領域を推定し、そこを拡大して読み直す
-            # （小さく表示されたカードは番号が 8px 程度で、全画面の検出では途切れる）。
-            # 変化領域に対しては行わない（領域自体を拡大して読むので不要で、失敗時の無駄が大きい）
+            if self._cancelled(cancel, result):
+                return result
+            # a. HP バッジアンカー（番号が隠れる詳細表示）。大きな箱を読み、名前・HP で検索する
+            t2 = time.perf_counter()
+            hp_lines = self._read_large_boxes(frame_bgr, boxes, read)
+            found, fallback_error = self._identify_by_hp_badge(
+                frame_bgr, boxes, hp_lines, read, result
+            )
+            result.timings_ms["hp_badge"] = (time.perf_counter() - t2) * 1000
+            if found is not None:
+                return found
+            # b. HP バッジからカード領域を推定し、拡大して番号を読み直す（小さな表示）
             t3 = time.perf_counter()
-            rois = self._hp_badge_rois(frame_bgr, boxes)
+            rois = self._hp_badge_rois(frame_bgr, hp_lines)
             result.hp_badge_rois = len(rois)
             for roi in rois:
-                sub = self.identify_fast(crop(frame_bgr, roi), _depth=1)
-                if sub.ok:
+                if self._cancelled(cancel, result):
+                    return result
+                sub = self._identify_roi(frame_bgr, roi)
+                if sub is not None:
                     for key, value in result.timings_ms.items():
                         sub.timings_ms.setdefault(f"frame_{key}", value)
                     sub.timings_ms["hp_roi"] = (time.perf_counter() - t3) * 1000
-                    if sub.card_box is not None:
-                        b = sub.card_box
-                        sub.card_box = CardBox(
-                            roi.rx + b.rx * roi.rw,
-                            roi.ry + b.ry * roi.rh,
-                            b.rw * roi.rw,
-                            b.rh * roi.rh,
-                            b.confidence,
-                        )
                     return sub
             result.timings_ms["hp_roi"] = (time.perf_counter() - t3) * 1000
+            # c. 3 段目: 残りの箱をすべて読む。全行認識（通常パイプラインのパス 1）と同じ範囲を
+            # 検出をやり直さずに済ませる。小さい順に読み、上限を超える大きな箱は省く
+            if self._cancelled(cancel, result):
+                return result
+            t4 = time.perf_counter()
+            rest = sorted(
+                (b for b in boxes if b not in read),
+                key=lambda b: box_rect(b)[3] - box_rect(b)[1],
+            )[:FAST_TIER3_MAX_BOXES]
+            self._read_boxes(frame_bgr, rest, read)
+            anchor = find_number_anchor(to_geoms(self._lines(read), w, h), w / h)
+            result.timings_ms["ocr_rest"] = (time.perf_counter() - t4) * 1000
+            if anchor is not None and anchor.line is not None:
+                # 1〜2 段目で読めなかった理由を残す（段階の選び方を直す材料にする）
+                x0, y0, x1, y1 = box_rect(anchor.line.box)
+                log.info(
+                    "番号行を 3 段目で発見: %r h=%.1f%% aspect=%.1f bottom=%.2f boxes=%d",
+                    anchor.line.text,
+                    (y1 - y0) / h * 100,
+                    (x1 - x0) / max(y1 - y0, 1.0),
+                    y1 / h,
+                    len(boxes),
+                )
         # 元解像度での再検出は行わない（常駐ログの集計で約 150 回中 1 回しか成功せず、
         # 失敗 1 回あたり 0.6 秒を費やしていた。小さな表示は HP バッジ経由の拡大で拾う）
-        result.ocr_lines = lines
+        result.ocr_lines = self._lines(read)
         if anchor is None:
-            result.error = "番号行が見つかりません（高速パス）"
+            result.error = fallback_error or "番号行が見つかりません（高速パス）"
             return result
         result.anchor_kind = "number"
         result.card_box = anchor.roi
@@ -371,15 +469,10 @@ class Pipeline:
         ref, reason = self.resolve_en_ref(rec, [])
         if ref is None:
             # セットコードが読めない・分母が衝突 → 番号行と左端が揃う上の行（名前）を読む
-            t2 = time.perf_counter()
+            t5 = time.perf_counter()
             name_boxes = self._name_boxes_above(boxes, anchor, w)
-            name_texts = self.ocr.recognize([crop_box(frame_bgr, b) for b in name_boxes])
-            name_lines = [
-                OcrLine(text=t, confidence=c, box=b)
-                for b, (t, c) in zip(name_boxes, name_texts, strict=True)
-                if t
-            ]
-            result.ocr_lines = lines + name_lines
+            self._read_boxes(frame_bgr, name_boxes, read)
+            result.ocr_lines = self._lines(read)
             rec = extract_card_info(result.ocr_lines, frame_height=h)
             rec = RecognizedCard(
                 name_en=rec.name_en,
@@ -391,21 +484,37 @@ class Pipeline:
                 confidence=anchor.confidence,
             )
             ref, reason = self.resolve_en_ref(rec, [ln.text for ln in result.ocr_lines])
-            result.timings_ms["ocr_name"] = (time.perf_counter() - t2) * 1000
+            result.timings_ms["ocr_name"] = (time.perf_counter() - t5) * 1000
         result.recognized = rec
         if ref is None:
             result.error = reason
             return result
         return self._finish(result, ref, reason)
 
-    def _hp_badge_rois(self, frame_bgr: np.ndarray, boxes: list[Box]) -> list[CardBox]:
-        """大きな数字で終わる箱（HP バッジ。名前バーと結合していることもある）からカード領域を推定。
+    def _identify_roi(self, frame_bgr: np.ndarray, roi: CardBox) -> IdentifyResult | None:
+        """カード領域と推定した矩形を拡大して番号を読み直す。
 
-        拡大表示のカードは左上に名前、右上に HP バッジがある。バッジの右端からカード幅ぶん左、
-        下にカード高さぶんの矩形を、バッジの大きい順に返す。
-        場のカードの HP バッジも候補に入るため、呼び出し側は順に試す。
+        成功した結果（座標はフレーム比率）か None を返す。
+
+        最近同じ場所・同じ見た目で読めなかった領域は省く。読めなかった領域は記憶するが、
+        番号は読めて照合だけ失敗した（通信エラー等）場合は記憶しない（次は通るかもしれない）。
         """
-        h, w = frame_bgr.shape[:2]
+        if self._roi_recently_failed(frame_bgr, roi):
+            log.debug("最近失敗した HP バッジ領域なので省略: %s", roi)
+            return None
+        sub = self.identify_fast(crop(frame_bgr, roi), _depth=1)
+        if sub.ok:
+            sub.card_box = to_frame_box(sub.card_box, roi)
+            return sub
+        if sub.en_ref is None:
+            self._remember_failed_roi(frame_bgr, roi)
+        return None
+
+    def _read_large_boxes(
+        self, frame_bgr: np.ndarray, boxes: list[Box], read: dict[Box, OcrLine | None]
+    ) -> list[OcrLine]:
+        """HP バッジの候補になる大きめの箱（大きい順に最大 16 個）を読んで返す。"""
+        h = frame_bgr.shape[0]
         cands: list[tuple[float, Box]] = []
         for b in boxes:
             x0, y0, x1, y1 = box_rect(b)
@@ -413,15 +522,102 @@ class Pipeline:
             if bh >= FAST_HP_MIN_HEIGHT * h and bw / max(bh, 1.0) <= FAST_HP_MAX_ASPECT:
                 cands.append((bh, b))
         cands.sort(key=lambda t: -t[0])
-        cands = cands[:FAST_HP_MAX_CANDIDATES]
-        if not cands:
-            return []
-        texts = self.ocr.recognize([crop_box(frame_bgr, b) for _, b in cands])
-        rois: list[CardBox] = []
-        for (bh, b), (t, _) in zip(cands, texts, strict=True):
-            if not _TRAILING_HP_RE.search(t):
-                continue
+        boxes_sel = [b for _, b in cands[:FAST_HP_MAX_CANDIDATES]]
+        self._read_boxes(frame_bgr, boxes_sel, read)
+        return [ln for b in boxes_sel if (ln := read.get(b)) is not None]
+
+    def _identify_by_hp_badge(
+        self,
+        frame_bgr: np.ndarray,
+        boxes: list[Box],
+        hp_lines: list[OcrLine],
+        read: dict[Box, OcrLine | None],
+        result: IdentifyResult,
+    ) -> tuple[IdentifyResult | None, str | None]:
+        """HP バッジ（大きな数字）とその左の名前行から英語カードを特定する。
+
+        通常パイプラインの HP バッジアンカーと同じ判定を、全行認識せずに行う: 最も大きい数字の
+        左にある行だけを読んで名前を決める。まず推定したカード領域を拡大して番号を読み直し
+        （番号が見えていれば検索より確実）、読めなければ領域内の行をワザ名として名前・HP・ワザ名で
+        検索する。戻り値は (成功した結果 or None, 失敗理由 or None)。`result` は成功時だけ更新する。
+        """
+        h, w = frame_bgr.shape[:2]
+        badges = [
+            ln
+            for ln in hp_lines
+            if is_hp_badge_text(ln.text)
+            and (box_rect(ln.box)[3] - box_rect(ln.box)[1]) >= HP_BADGE_MIN_HEIGHT * h
+        ]
+        if not badges:
+            return None, None
+        hp = max(badges, key=lambda ln: box_rect(ln.box)[3] - box_rect(ln.box)[1])
+        hx0, hy0, hx1, hy1 = box_rect(hp.box)
+        hp_h, hp_cy = hy1 - hy0, (hy0 + hy1) / 2
+        # 名前候補: HP バッジの左にあり、縦に重なる箱（find_hp_badge_anchor と同じ条件）
+        name_boxes = []
+        for b in boxes:
             x0, y0, x1, y1 = box_rect(b)
+            if x0 >= hx0 or hx0 - x1 >= FAST_HP_NAME_MAX_GAP * w:
+                continue
+            if abs((y0 + y1) / 2 - hp_cy) >= hp_h or (y1 - y0) < hp_h * 0.3:
+                continue
+            name_boxes.append(b)
+        self._read_boxes(frame_bgr, name_boxes, read)
+        anchor = find_hp_badge_anchor(to_geoms(self._lines(read, True), w, h), w / h)
+        if anchor is None:
+            return None, None
+        # 番号が見えている表示（バトル場の詳細表示など）なら、拡大して読んだ番号で確定する
+        sub = self._identify_roi(frame_bgr, anchor.roi)
+        if sub is not None:
+            for key, value in result.timings_ms.items():
+                sub.timings_ms.setdefault(f"frame_{key}", value)
+            return sub, None
+        # カード領域内の行（ワザ名・特性名）を読み、アンカーを作り直して text_lines を埋める
+        roi = anchor.roi
+        column = []
+        for b in boxes:
+            x0, y0, x1, y1 = box_rect(b)
+            if (
+                x0 / w >= roi.rx - 0.05
+                and x1 / w <= roi.rx + roi.rw + 0.05
+                and roi.ry <= y0 / h <= roi.ry + roi.rh
+            ):
+                column.append(b)
+        # 行は全行認識と同じ読み順（上から下）に並べる。検索に使うワザ名は先頭 2 つまでなので、
+        # 順番が違うと別の印刷が先頭に来ることがある
+        self._read_boxes(frame_bgr, column, read)
+        lines = self._lines(read, True)
+        anchor = find_hp_badge_anchor(to_geoms(lines, w, h), w / h) or anchor
+        refs, reason = self.resolve_by_search(anchor)
+        if not refs:
+            return None, reason
+        result.ocr_lines = lines
+        result.anchor_kind = "hp_badge"
+        result.card_box = anchor.roi
+        result.recognized = RecognizedCard(
+            name_en=anchor.name,
+            set_code=None,
+            number=None,
+            hp=anchor.hp,
+            confidence=anchor.confidence,
+        )
+        result.en_candidates = refs
+        return self._finish(result, refs[0], reason), None
+
+    def _hp_badge_rois(self, frame_bgr: np.ndarray, hp_lines: list[OcrLine]) -> list[CardBox]:
+        """大きな数字で終わる箱（HP バッジ。名前バーと結合していることもある）からカード領域を推定。
+
+        拡大表示のカードは左上に名前、右上に HP バッジがある。バッジの右端からカード幅ぶん左、
+        下にカード高さぶんの矩形を、バッジの大きい順に返す。
+        場のカードの HP バッジも候補に入るため、呼び出し側は順に試す。
+        """
+        h, w = frame_bgr.shape[:2]
+        rois: list[CardBox] = []
+        for ln in hp_lines:
+            if not _TRAILING_HP_RE.search(ln.text):
+                continue
+            x0, y0, x1, y1 = box_rect(ln.box)
+            bh = y1 - y0
             # バッジ高さに対するカード高さは表示の種類で 11〜18 倍。大きめに取る
             card_h = bh * FAST_HP_CARD_HEIGHT_RATIO
             card_w = card_h * CARD_ASPECT
@@ -437,6 +633,44 @@ class Pipeline:
                 )
             )
         return rois[:FAST_HP_MAX_TRIES]
+
+    # 失敗した HP バッジ領域の記憶。盤面のポケモンの HP バッジは演出のたびに候補になるが、
+    # 位置も見た目も変わらないので、同じ場所・同じ見た目なら拡大して読み直さない
+    @staticmethod
+    def _roi_thumb(frame_bgr: np.ndarray, roi: CardBox) -> np.ndarray | None:
+        sub = crop(frame_bgr, roi)
+        if sub.size == 0:
+            return None
+        gray = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+        return cv2.resize(gray, FAILED_ROI_THUMB_SIZE, interpolation=cv2.INTER_AREA).astype(
+            np.float32
+        )
+
+    def _roi_recently_failed(self, frame_bgr: np.ndarray, roi: CardBox) -> bool:
+        thumb: np.ndarray | None = None
+        now = time.monotonic()
+        for cached_roi, cached_thumb, at in self._failed_rois:
+            if now - at > FAILED_ROI_TTL_S:
+                continue
+            if (
+                abs(cached_roi.rx - roi.rx) > FAILED_ROI_POS_TOLERANCE
+                or abs(cached_roi.ry - roi.ry) > FAILED_ROI_POS_TOLERANCE
+                or abs(cached_roi.rw - roi.rw) > FAILED_ROI_POS_TOLERANCE
+                or abs(cached_roi.rh - roi.rh) > FAILED_ROI_POS_TOLERANCE
+            ):
+                continue
+            if thumb is None:
+                thumb = self._roi_thumb(frame_bgr, roi)
+                if thumb is None:
+                    return False
+            if float(np.mean(np.abs(thumb - cached_thumb))) < FAILED_ROI_MAX_DIFF:
+                return True
+        return False
+
+    def _remember_failed_roi(self, frame_bgr: np.ndarray, roi: CardBox) -> None:
+        thumb = self._roi_thumb(frame_bgr, roi)
+        if thumb is not None:
+            self._failed_rois.append((roi, thumb, time.monotonic()))
 
     @staticmethod
     def _name_boxes_above(boxes: list[Box], anchor: Anchor, w: int) -> list[Box]:

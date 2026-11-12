@@ -40,6 +40,19 @@ class CardBox:
         return cls(x / width, y / height, w / width, h / height, confidence)
 
 
+def to_frame_box(box: CardBox | None, region: CardBox) -> CardBox | None:
+    """領域（フレーム比率）内の比率座標を、フレーム全体の比率座標に戻す。"""
+    if box is None:
+        return None
+    return CardBox(
+        region.rx + box.rx * region.rw,
+        region.ry + box.ry * region.rh,
+        box.rw * region.rw,
+        box.rh * region.rh,
+        box.confidence,
+    )
+
+
 class CardDetector(Protocol):
     def detect(self, frame_bgr: np.ndarray) -> CardBox | None: ...
 

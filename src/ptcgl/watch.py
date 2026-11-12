@@ -8,6 +8,10 @@
 - 直前の基準フレームとの差分から「変化した領域」の外接矩形を求め、まずそこだけを OCR する。
   全画面 OCR（0.5〜1.5 秒）を省き、小さな領域の OCR（0.2〜0.4 秒）だけで済ませる。
   領域で見つからなければ全画面で再試行する
+- 認識の段階の切れ目で画面を撮り直し、認識中のフレームから画面が変わっていれば残りを打ち切る
+  （演出中の古いフレームに時間を使わず、次のティックで新しい画面を読む）。打ち切りでは基準フレームを
+  据え置き、動いている最中の失敗と同じく試行間隔だけ延ばす（演出が続く間に OCR が毎ティック
+  走らないようにする）
 - 静止していないフレームで失敗したときは基準フレームを更新しない（静止後に再度変化として拾う）。
   失敗が続いたら試行間隔を 1, 2, 4 … 回（上限 MAX_BACKOFF_TICKS）と倍々に延ばし、
   演出が続く盤面で OCR が走り続けないようにする
@@ -28,7 +32,7 @@ import numpy as np
 
 from ptcgl.capture.window import WindowInfo
 from ptcgl.pipeline import IdentifyResult
-from ptcgl.recognition.detector import CardBox, crop
+from ptcgl.recognition.detector import CardBox, crop, to_frame_box
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +43,7 @@ MAX_REGION_AREA = 0.6  # これより広く変化していれば全画面扱い
 MAX_BACKOFF_TICKS = 40
 MAX_STABLE_BACKOFF_TICKS = 8  # 静止画面での連続失敗後に待つ最大ティック数（既定 2 秒）
 WINDOW_SEARCH_EVERY_TICKS = 8  # PTCGL が見つからない間は 8 ティック（既定 2 秒）に 1 回だけ探す
+CANCEL_CHECK_INTERVAL_S = 0.15  # 中断判定のための撮り直しは最短でもこの間隔を空ける
 
 
 def _thumbnail(frame_bgr: np.ndarray) -> np.ndarray:
@@ -169,6 +174,14 @@ class FrameWatcher:
             # 動いている最中の失敗。基準は据え置き、静止したら再度変化として拾う
             self._unstable_failures += 1
 
+    def mark_aborted(self) -> None:
+        """画面が変わったため認識を打ち切った。基準は据え置き、動いている最中の失敗と同じく間隔を延ばす。
+
+        静止したフレームは間隔に関係なく読むので、演出が終わった瞬間やカードが出て止まった画面は
+        待たせない。
+        """
+        self._unstable_failures += 1
+
     def set_reference(self, frame_bgr: np.ndarray) -> None:
         """現在の画面を「認識済み」として基準にする（起動直後など）。"""
         self._reference = _thumbnail(frame_bgr)
@@ -179,22 +192,26 @@ class FrameWatcher:
 
 @dataclass(frozen=True)
 class WatchEvent:
-    """1 ステップの結果。`message` は no_window / minimized / error では画面向けの短い文言、
-    result では失敗理由（ログ用。画面には出さない）。"""
+    """1 回の監視ステップの結果。
 
-    """1 回の監視ステップの結果。"""
+    `message` は no_window / minimized / error では画面向けの短い文言、result では失敗理由
+    （ログ用。画面には出さない）。aborted は画面が変わったため認識を途中で打ち切ったことを表す。
+    """
 
-    kind: str  # "no_window" | "minimized" | "idle" | "result" | "error"
+    kind: str  # "no_window" | "minimized" | "idle" | "result" | "aborted" | "error"
     message: str = ""
     result: IdentifyResult | None = None
     elapsed_ms: float = 0.0
     region: CardBox | None = None
+    stable: bool = True  # 認識したフレームが静止していたか（ログ用）
 
 
 class WatchSession:
     """ウィンドウ探索・キャプチャ・変化判定・認識を 1 ステップずつ進める。
 
     依存はすべて呼び出し可能オブジェクトで受け取り、Qt や Win32 無しでテストできるようにする。
+    `identify_fast` が主経路。`identify`（通常パイプライン）は高速パスが無いときの経路、または
+    高速パスの後の最終手段で、None なら省く（高速パスは全行認識と同じ範囲を読むので通常は不要）。
     """
 
     def __init__(
@@ -202,11 +219,13 @@ class WatchSession:
         find_window: Callable[[], WindowInfo | None],
         refresh_window: Callable[[WindowInfo], WindowInfo | None],
         grab: Callable[[tuple[int, int, int, int]], np.ndarray],
-        identify: Callable[[np.ndarray], IdentifyResult],
+        identify: Callable[[np.ndarray], IdentifyResult] | None,
         watcher: FrameWatcher | None = None,
         on_status: Callable[[str], None] | None = None,
         identify_fast: Callable[..., IdentifyResult] | None = None,
     ) -> None:
+        if identify is None and identify_fast is None:
+            raise ValueError("identify か identify_fast のどちらかは必要です")
         self._find_window = find_window
         self._refresh_window = refresh_window
         self._grab = grab
@@ -241,23 +260,56 @@ class WatchSession:
             self._ticks_until_search = WINDOW_SEARCH_EVERY_TICKS - 1
         return found
 
-    def _recognize(self, frame: np.ndarray, region: CardBox | None) -> IdentifyResult:
-        """高速パス（変化領域 → 全画面）で試し、見つからなければ通常パイプラインで全画面を読む。"""
+    def _make_cancel(
+        self, frame: np.ndarray, rect: tuple[int, int, int, int]
+    ) -> Callable[[], bool]:
+        """認識中のフレームから画面が変わったかを、撮り直して判定する関数を返す。
+
+        撮り直しは CANCEL_CHECK_INTERVAL_S に 1 回まで。撮れなければ変わっていない扱いにする。
+        """
+        reference = _thumbnail(frame)
+        last_check = time.monotonic()
+
+        def cancel() -> bool:
+            nonlocal last_check
+            now = time.monotonic()
+            if now - last_check < CANCEL_CHECK_INTERVAL_S:
+                return False
+            last_check = now
+            try:
+                current = self._grab(rect)
+            except Exception:
+                return False
+            return frame_difference(reference, _thumbnail(current)) >= self.watcher.change_threshold
+
+        return cancel
+
+    def _recognize(
+        self, frame: np.ndarray, region: CardBox | None, cancel: Callable[[], bool]
+    ) -> IdentifyResult:
+        """変化領域 → 全画面の高速パス → （あれば）通常パイプラインの順に試す。
+
+        段階の切れ目で `cancel` を確認し、画面が変わっていれば `cancelled` 付きの結果を返す。
+        """
         if region is not None:
             sub = crop(frame, region)
             if sub.shape[0] >= 32 and sub.shape[1] >= 32:
-                result = (self._identify_fast or self._identify)(sub)
+                identify = self._identify_fast or self._identify
+                assert identify is not None
+                result = identify(sub)
                 if result.ok:
-                    result.card_box = _to_frame_box(result.card_box, region)
+                    result.card_box = to_frame_box(result.card_box, region)
                     return result
                 log.info(
                     "変化領域では見つからず全画面で再試行: %s timings=%s",
                     result.error,
                     {k: round(v) for k, v in result.timings_ms.items()},
                 )
+                if cancel():
+                    return IdentifyResult.aborted()
         if self._identify_fast is not None:
-            result = self._identify_fast(frame, full_frame=True)
-            if result.ok:
+            result = self._identify_fast(frame, full_frame=True, cancel=cancel)
+            if result.ok or result.cancelled or self._identify is None:
                 return result
             log.info(
                 "高速パスで見つからず通常パイプラインへ: %s hp_rois=%s timings=%s",
@@ -265,6 +317,9 @@ class WatchSession:
                 result.hp_badge_rois,
                 {k: round(v) for k, v in result.timings_ms.items()},
             )
+            if cancel():
+                return IdentifyResult.aborted()
+        assert self._identify is not None
         return self._identify(frame)
 
     def step(self) -> WatchEvent:
@@ -286,26 +341,25 @@ class WatchSession:
         self._status("認識中...")
         t0 = time.perf_counter()
         try:
-            result = self._recognize(frame, decision.region)
+            cancel = self._make_cancel(frame, window.client_rect)
+            result = self._recognize(frame, decision.region, cancel)
         except Exception:
             log.exception("認識中にエラー")
             self.watcher.mark_recognized(frame, found=False)
             return WatchEvent("error", "認識に失敗しました")
-        self.watcher.mark_recognized(frame, found=result.ok)
         elapsed = (time.perf_counter() - t0) * 1000
+        if result.cancelled:
+            # 基準フレームは据え置く（次のティックで新しい画面を変化として読む）。試行間隔は延ばす
+            self.watcher.mark_aborted()
+            kind = "aborted"
+        else:
+            self.watcher.mark_recognized(frame, found=result.ok)
+            kind = "result"
         return WatchEvent(
-            "result", result.error or "", result=result, elapsed_ms=elapsed, region=decision.region
+            kind,
+            result.error or "",
+            result=result,
+            elapsed_ms=elapsed,
+            region=decision.region,
+            stable=decision.stable,
         )
-
-
-def _to_frame_box(box: CardBox | None, region: CardBox) -> CardBox | None:
-    """領域内の比率座標をフレーム全体の比率座標に戻す。"""
-    if box is None:
-        return None
-    return CardBox(
-        region.rx + box.rx * region.rw,
-        region.ry + box.ry * region.rh,
-        box.rw * region.rw,
-        box.rh * region.rh,
-        box.confidence,
-    )

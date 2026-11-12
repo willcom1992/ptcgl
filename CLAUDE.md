@@ -32,6 +32,7 @@ python -m ptcgl -v identify --image shot.png           # 画像から検出→OC
 python -m ptcgl windows                                # ウィンドウ一覧（DPI・矩形）
 python -m ptcgl capture --window "TCG Live" --out shot.png
 python scripts/evaluate.py assets/samples --out docs/validation-results.md
+python scripts/analyze_log.py --since "2026-11-12 10:00"   # 常駐ログの所要時間を経路別に集計
 python scripts/build_en_sets.py                        # セット表の再生成（main に push すると配布済みアプリにも届く）
 python scripts/build_icon.py                           # アプリアイコン（packaging/ptcgl.ico, data/icon.png）の再生成
 
