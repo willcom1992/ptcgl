@@ -10,7 +10,8 @@
   領域で見つからなければ全画面で再試行する
 - 認識の段階の切れ目で画面を撮り直し、認識中のフレームから画面が変わっていれば残りを打ち切る
   （演出中の古いフレームに時間を使わず、次のティックで新しい画面を読む）。ただし読んでいる文字の
-  箱の中が変わっていなければ続ける（詳細表示の背後で盤面の演出が続いても、カードは出たまま）。
+  箱の中の差分が CANCEL_TEXT_DIFF_RATIO 倍のしきい値に満たなければ続ける（詳細表示の背後で
+  盤面の演出が続いても、またカードのホロ加工が光っても、カードは出たまま）。
   打ち切りでは基準フレームを据え置き、動いている最中の失敗と同じく試行間隔だけ延ばす
   （演出が続く間に OCR が毎ティック走らないようにする）
 - 静止していないフレームで失敗したときは基準フレームを更新しない（静止後に再度変化として拾う）。
@@ -47,6 +48,9 @@ MAX_BACKOFF_TICKS = 40
 STABLE_FAILURE_WAIT_TICKS = 2
 WINDOW_SEARCH_EVERY_TICKS = 8  # PTCGL が見つからない間は 8 ティック（既定 2 秒）に 1 回だけ探す
 CANCEL_CHECK_INTERVAL_S = 0.15  # 中断判定のための撮り直しは最短でもこの間隔を空ける
+# 文字の箱の中の差分は change_threshold のこの倍率以上で「カードが消えた」とみなす。
+# ホロ加工の光や浮遊の演出は箱の中でも 4〜15 程度の差分を出す（対戦ログ）。カードが消えれば 30 以上
+CANCEL_TEXT_DIFF_RATIO = 4.0
 
 
 def _thumbnail(frame_bgr: np.ndarray) -> np.ndarray:
@@ -234,9 +238,9 @@ class ChangeCanceller:
 
     撮り直しは CANCEL_CHECK_INTERVAL_S に 1 回まで。撮れなければ変わっていない扱いにする。
     `boxes`（読んでいる文字の箱。フレーム比率）が渡されたときは、画面全体が変わっていても
-    箱の中が変わっていなければ続ける。詳細表示の背後で盤面の演出が続く間に、出たままのカードの
-    認識を何度も打ち切らないため（対戦ログで 8 回連続の打ち切りが 2 件あり、表示まで 12〜16 秒
-    かかっていた）。
+    箱の中の差分が `threshold * CANCEL_TEXT_DIFF_RATIO` 未満なら続ける。詳細表示の背後で盤面の
+    演出が続く間や、ホロ加工のカードが光る間に、出たままのカードの認識を何度も打ち切らないため
+    （対戦ログで 6〜8 回連続の打ち切りが数件あり、表示まで 10〜16 秒かかっていた）。
     """
 
     def __init__(
@@ -250,6 +254,7 @@ class ChangeCanceller:
         self._rect = rect
         self._reference = _thumbnail(frame)
         self._threshold = threshold
+        self._text_threshold = threshold * CANCEL_TEXT_DIFF_RATIO
         self._last_check = time.monotonic()
         self.last_diff = 0.0  # 最後の撮り直しでの画面全体の差分
         # 同じく文字の箱の中だけの差分（箱が無ければ None）
@@ -271,7 +276,7 @@ class ChangeCanceller:
             return False
         if boxes:
             self.last_text_diff = masked_difference(self._reference, current, boxes)
-            if self.last_text_diff is not None and self.last_text_diff < self._threshold:
+            if self.last_text_diff is not None and self.last_text_diff < self._text_threshold:
                 self.background_changes += 1
                 log.debug(
                     "画面は変化したが文字の箱の中は不変なので続行: diff=%.1f text_diff=%.1f",

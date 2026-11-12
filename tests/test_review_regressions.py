@@ -91,11 +91,17 @@ def _repo(tmp_path: Path, handler) -> CardRepository:
 def test_identify_ref_keeps_match_when_image_download_fails(tmp_path: Path) -> None:
     repo = _repo(tmp_path, _handler_factory(fail_png=True, fail_jp_page=False))
     pipeline = Pipeline(repo, ocr=object())  # type: ignore[arg-type]
+    progress: list[str] = []
+    pipeline.on_progress = progress.append
     result = pipeline.identify_ref(CardRef("en", "SVI", "1"))
     assert result.match is not None and result.match.best is not None
     assert result.match.best.image_path is None
     assert len(result.match.candidates) == 2
     assert result.error is None
+    # 取得に入る前に状態を知らせる（画像が無い結果はキャッシュされないので 2 回目も知らせる）
+    assert progress == ["SVI #1 を特定。日本語版を取得中..."]
+    pipeline.identify_ref(CardRef("en", "SVI", "1"))
+    assert len(progress) == 2
 
 
 def test_saved_mapping_survives_missing_jp_page(tmp_path: Path) -> None:

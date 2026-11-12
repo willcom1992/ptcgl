@@ -35,6 +35,10 @@ _ABORT_RE = re.compile(
     r"(?:bg=(?P<bg>\d+) )?timings=(?P<timings>\{.*?\})"
     r"(?: .*diff=(?P<diff>[\d.]+) text_diff=(?P<text_diff>\S+))?$"
 )
+_ROI_RE = re.compile(
+    r"HP バッジ領域の拡大読み直しで番号なし: (?P<n>\d+) 件（省略 (?P<skipped>\d+), "
+    r"記憶との差分 (?P<diffs>\[.*?\]), (?P<ms>\d+)ms）"
+)
 _TS_FORMAT = "%Y-%m-%d %H:%M:%S,%f"
 
 
@@ -70,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
     aborts: list[float] = []
     abort_diffs: list[tuple[float, float | None]] = []  # 中断時の (画面全体, 文字の箱の中) の差分
     background_changes = 0  # 画面は変わったが文字の箱の中は不変で続行した回数
+    roi_rois = roi_skipped = 0  # HP バッジ領域の拡大読み直し（失敗）の件数と、記憶で省いた件数
+    roi_ms: list[float] = []
+    roi_diffs: Counter[str] = Counter()  # 記憶との差分の分布
     for line in args.log.read_text(encoding="utf-8", errors="replace").splitlines():
         if args.since and line[: len(args.since)] < args.since:
             continue
@@ -94,6 +101,23 @@ def main(argv: list[str] | None = None) -> int:
             if m["diff"]:
                 text_diff = None if m["text_diff"] == "-" else float(m["text_diff"])
                 abort_diffs.append((float(m["diff"]), text_diff))
+            continue
+        m = _ROI_RE.search(line)
+        if m:
+            roi_rois += int(m["n"])
+            roi_skipped += int(m["skipped"])
+            roi_ms.append(int(m["ms"]))
+            for d in ast.literal_eval(m["diffs"]):
+                if d is None:
+                    roi_diffs["記憶なし"] += 1
+                elif d < 10:
+                    roi_diffs["<10"] += 1
+                elif d < 20:
+                    roi_diffs["10-20"] += 1
+                elif d < 40:
+                    roi_diffs["20-40"] += 1
+                else:
+                    roi_diffs[">=40"] += 1
 
     print(f"ログ: {args.log}")
     print(f"認識: {len(results)} 回, 中断: {len(aborts)} 回")
@@ -118,6 +142,14 @@ def main(argv: list[str] | None = None) -> int:
         if text:
             line += f" / 文字の箱の中 中央値 {statistics.median(text):.1f} 最小 {min(text):.1f}"
         print(line)
+
+    if roi_rois:
+        print(
+            f"HP バッジ領域の読み直し（失敗）: {roi_rois} 件 / {len(roi_ms)} 回,"
+            f" 記憶で省略 {roi_skipped}, 1 回の中央値 {statistics.median(roi_ms):.0f} ms,"
+            f" 合計 {sum(roi_ms) / 1000:.0f} 秒"
+        )
+        print("  記憶との差分:", dict(roi_diffs.most_common()))
 
     print("\n経路別（成功した認識）:")
     by_path: dict[str, list[float]] = defaultdict(list)

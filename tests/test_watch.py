@@ -383,14 +383,19 @@ def test_canceller_continues_when_only_background_changes(monkeypatch) -> None: 
     rect = (0, 0, 1280, 720)
     text_boxes = [CardBox(400 / 1280, 200 / 720, 300 / 1280, 400 / 720)]
 
+    shimmer = _frame_with_card(120, 228)  # 背景の演出に加え、ホロ加工の光で箱の中も少し変わった
+    frames.insert(1, shimmer)
+
     cancel = ChangeCanceller(lambda r: frames.pop(0), card, rect, threshold=4.0)
     assert cancel(text_boxes) is False  # 画面全体は変わったが箱の中は不変
     assert cancel.background_changes == 1
     assert cancel.last_diff >= 4.0 and cancel.last_text_diff == 0.0
+    assert cancel(text_boxes) is False  # 箱の中の差分 8 はしきい値（4 × 4 = 16）未満なので続ける
+    assert cancel.last_text_diff == 8.0 and cancel.background_changes == 2
     assert cancel() is True  # 箱が無ければ画面全体で判定する
-    assert cancel(text_boxes) is True  # 箱の中が変われば打ち切る
-    assert cancel.last_text_diff is not None and cancel.last_text_diff >= 4.0
-    assert cancel.background_changes == 1
+    assert cancel(text_boxes) is True  # 箱の中が大きく変われば打ち切る
+    assert cancel.last_text_diff is not None and cancel.last_text_diff >= 16.0
+    assert cancel.background_changes == 2
 
 
 def test_canceller_rate_limits_and_tolerates_capture_errors(monkeypatch) -> None:  # noqa: ANN001

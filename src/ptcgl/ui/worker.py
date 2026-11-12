@@ -64,6 +64,7 @@ class RecognitionWorker(QObject):
             ),
             on_status=self.status_changed.emit,
         )
+        self._pipeline.on_progress = self.status_changed.emit
 
     # --- ウィンドウ探索（ワーカースレッドで実行） ---------------------------
 

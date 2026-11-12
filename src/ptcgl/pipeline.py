@@ -67,8 +67,8 @@ FAST_HP_CARD_HEIGHT_RATIO = 18.0
 FAST_HP_MAX_CANDIDATES = 16
 FAST_HP_NAME_MAX_GAP = 0.25  # 名前行の右端から HP バッジまでの最大間隔（フレーム幅比）
 # 失敗した HP バッジ領域の記憶（位置の許容差は比率、見た目の差は縮小グレースケールの平均絶対差分）
-FAILED_ROI_CACHE_SIZE = 8
-FAILED_ROI_TTL_S = 60.0  # これより古い記憶は使わない（盤面はターンごとに変わる）
+FAILED_ROI_CACHE_SIZE = 16
+FAILED_ROI_TTL_S = 120.0  # これより古い記憶は使わない（盤面はターンごとに変わる）
 FAILED_ROI_POS_TOLERANCE = 0.01
 FAILED_ROI_MAX_DIFF = 10.0
 FAILED_ROI_THUMB_SIZE = (24, 32)
@@ -136,6 +136,10 @@ class Pipeline:
         self.repo = repo
         self.ocr = ocr or OcrEngine()
         self.detector = detector  # 設定で手動領域が指定された場合などに使う。None ならアンカー方式
+        # 時間のかかる段階に入るときに呼ぶ（常駐モードの状態表示用）。初めて見るカードの
+        # 日本語版取得は Limitless に 1 秒 1 回のアクセスで 2〜5 秒かかるため、その間の状態を
+        # 知らせる
+        self.on_progress: Callable[[str], None] | None = None
         # 英語カード → 照合結果のメモリキャッシュ。同じカードを続けて認識したときに
         # Limitless ページの再解析（約 25 ms）を省く。手動で候補を選び直したら捨てる
         self._match_cache: dict[CardRef, MatchResult] = {}
@@ -235,6 +239,8 @@ class Pipeline:
                 )
                 return result
             self._match_cache.pop(ref, None)  # 画像が消されていたら取り直す
+        if self.on_progress is not None:
+            self.on_progress(f"{ref.set_code} #{ref.number} を特定。日本語版を取得中...")
         try:
             match = self.repo.find_japanese(ref)
             if match.best is not None:
@@ -435,16 +441,28 @@ class Pipeline:
             t3 = time.perf_counter()
             rois = self._hp_badge_rois(frame_bgr, hp_lines)
             result.hp_badge_rois = len(rois)
+            roi_diffs: list[float | None] = []  # 記憶した失敗領域との差分（None は記憶なし）
             for roi in rois:
                 if self._cancelled(cancel, result, text_boxes):
                     return result
-                sub = self._identify_roi(frame_bgr, roi)
+                sub = self._identify_roi(frame_bgr, roi, roi_diffs)
                 if sub is not None:
                     for key, value in result.timings_ms.items():
                         sub.timings_ms.setdefault(f"frame_{key}", value)
                     sub.timings_ms["hp_roi"] = (time.perf_counter() - t3) * 1000
                     return sub
             result.timings_ms["hp_roi"] = (time.perf_counter() - t3) * 1000
+            if rois:
+                # 失敗領域の記憶がどれだけ効いているかを残す（しきい値の調整材料）
+                skipped = sum(1 for d in roi_diffs if d is not None and d < FAILED_ROI_MAX_DIFF)
+                log.info(
+                    "HP バッジ領域の拡大読み直しで番号なし: %d 件"
+                    "（省略 %d, 記憶との差分 %s, %.0fms）",
+                    len(rois),
+                    skipped,
+                    [None if d is None else round(d) for d in roi_diffs],
+                    result.timings_ms["hp_roi"],
+                )
             # c. 3 段目: 残りの箱をすべて読む。全行認識（通常パイプラインのパス 1）と同じ範囲を
             # 検出をやり直さずに済ませる。小さい順に読み、上限を超える大きな箱は省く
             if self._cancelled(cancel, result, text_boxes):
@@ -510,16 +528,22 @@ class Pipeline:
             return result
         return self._finish(result, ref, reason)
 
-    def _identify_roi(self, frame_bgr: np.ndarray, roi: CardBox) -> IdentifyResult | None:
+    def _identify_roi(
+        self, frame_bgr: np.ndarray, roi: CardBox, diffs: list[float | None] | None = None
+    ) -> IdentifyResult | None:
         """カード領域と推定した矩形を拡大して番号を読み直す。
 
         成功した結果（座標はフレーム比率）か None を返す。
 
         最近同じ場所・同じ見た目で読めなかった領域は省く。読めなかった領域は記憶するが、
         番号は読めて照合だけ失敗した（通信エラー等）場合は記憶しない（次は通るかもしれない）。
+        `diffs` を渡すと、記憶した失敗領域との最小差分（記憶が無ければ None）を追記する。
         """
-        if self._roi_recently_failed(frame_bgr, roi):
-            log.debug("最近失敗した HP バッジ領域なので省略: %s", roi)
+        diff = self._failed_roi_difference(frame_bgr, roi)
+        if diffs is not None:
+            diffs.append(diff)
+        if diff is not None and diff < FAILED_ROI_MAX_DIFF:
+            log.debug("最近失敗した HP バッジ領域なので省略: %s diff=%.1f", roi, diff)
             return None
         sub = self.identify_fast(crop(frame_bgr, roi), _depth=1)
         if sub.ok:
@@ -665,9 +689,11 @@ class Pipeline:
             np.float32
         )
 
-    def _roi_recently_failed(self, frame_bgr: np.ndarray, roi: CardBox) -> bool:
+    def _failed_roi_difference(self, frame_bgr: np.ndarray, roi: CardBox) -> float | None:
+        """同じ場所で最近失敗した領域の記憶との最小差分。記憶が無ければ None。"""
         thumb: np.ndarray | None = None
         now = time.monotonic()
+        best: float | None = None
         for cached_roi, cached_thumb, at in self._failed_rois:
             if now - at > FAILED_ROI_TTL_S:
                 continue
@@ -681,10 +707,11 @@ class Pipeline:
             if thumb is None:
                 thumb = self._roi_thumb(frame_bgr, roi)
                 if thumb is None:
-                    return False
-            if float(np.mean(np.abs(thumb - cached_thumb))) < FAILED_ROI_MAX_DIFF:
-                return True
-        return False
+                    return None
+            diff = float(np.mean(np.abs(thumb - cached_thumb)))
+            if best is None or diff < best:
+                best = diff
+        return best
 
     def _remember_failed_roi(self, frame_bgr: np.ndarray, roi: CardBox) -> None:
         thumb = self._roi_thumb(frame_bgr, roi)
