@@ -111,3 +111,5 @@ def test_name_variants_strip_glued_suffix_only_from_last_word() -> None:
     # 空白で分かれた "ex" や、語尾の無い名前には手を付けない
     assert name_variants("Charizard ex") == ["Charizard ex"]
     assert name_variants("Pikachu") == ["Pikachu"]
+    assert name_variants("Vulpix") == ["Vulpix"]  # 1 文字の x は外さない
+    assert name_variants("EEVEE") == ["EEVEE"]  # 大文字で終わる語には当てない

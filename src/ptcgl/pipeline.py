@@ -433,7 +433,7 @@ class Pipeline:
             t2 = time.perf_counter()
             hp_lines = self._read_large_boxes(frame_bgr, boxes, read)
             found, fallback_error = self._identify_by_hp_badge(
-                frame_bgr, boxes, hp_lines, read, result
+                frame_bgr, boxes, hp_lines, read, result, cancel, text_boxes
             )
             result.timings_ms["hp_badge"] = (time.perf_counter() - t2) * 1000
             if found is not None:
@@ -583,13 +583,17 @@ class Pipeline:
         hp_lines: list[OcrLine],
         read: dict[Box, OcrLine | None],
         result: IdentifyResult,
+        cancel: CancelCheck | None = None,
+        text_boxes: Sequence[CardBox] = (),
     ) -> tuple[IdentifyResult | None, str | None]:
         """HP バッジ（大きな数字）とその左の名前行から英語カードを特定する。
 
         通常パイプラインの HP バッジアンカーと同じ判定を、全行認識せずに行う: 最も大きい数字の
         左にある行だけを読んで名前を決める。まず推定したカード領域を拡大して番号を読み直し
         （番号が見えていれば検索より確実）、読めなければ領域内の行をワザ名として名前・HP・ワザ名で
-        検索する。戻り値は (成功した結果 or None, 失敗理由 or None)。`result` は成功時だけ更新する。
+        検索する。戻り値は (成功した結果 or None, 失敗理由 or None)。`result` は成功時と
+        中断時（`cancel` が真。検索は 1 秒 1 回なので、その前に画面が変わっていれば投げない）
+        だけ更新する。
         """
         h, w = frame_bgr.shape[:2]
         badges = [
@@ -638,6 +642,8 @@ class Pipeline:
         self._read_boxes(frame_bgr, column, read)
         lines = self._lines(read, True)
         anchor = find_hp_badge_anchor(to_geoms(lines, w, h), w / h) or anchor
+        if self._cancelled(cancel, result, text_boxes):
+            return result, None
         refs, reason = self.resolve_by_search(anchor)
         if not refs:
             return None, reason

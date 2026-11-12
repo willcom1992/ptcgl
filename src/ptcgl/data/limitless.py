@@ -130,10 +130,10 @@ def normalize_search_text(text: str) -> str:
     return " ".join(_CAMEL_SPLIT_RE.sub(" ", word) for word in text.split())
 
 
-# 末尾の語が「3 文字以上の名前 + ex 等」の形。"ex" だけの語（"Charizard ex"）には当たらない
-_GLUED_SUFFIX_RE = re.compile(
-    r"^(?P<base>[A-Za-z][A-Za-z'’.\-]+?[a-z])(?:ex|e|x|v|vmax|vstar|gx)$", re.IGNORECASE
-)
+# 末尾の語が「3 文字以上の名前 + ex 等」の形。"ex" だけの語（"Charizard ex"）には当たらない。
+# 1 文字の x は外さない（Onix, Vulpix …で余計な検索をしない）。e は "Oricorioe"（x が落ちた読み）
+# のために残す。名前側は小文字で終わる語だけ（"EEVEE" に当てない）
+_GLUED_SUFFIX_RE = re.compile(r"^(?P<base>[A-Za-z][A-Za-z'’.\-]+?[a-z])(?i:ex|e|v|vmax|vstar|gx)$")
 
 
 def name_variants(name: str) -> list[str]:

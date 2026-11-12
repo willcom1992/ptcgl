@@ -331,7 +331,8 @@ def test_session_aborts_when_screen_changes_during_recognition(monkeypatch) -> N
     s.step()
     ev = s.step()
     assert ev.kind == "aborted" and ev.result is not None and ev.result.cancelled
-    assert full_calls == 0  # 全画面の高速パスに進む前に打ち切った
+    # 変化領域の直後は箱が分からないので判定せず、全画面の高速パスの中で打ち切る
+    assert full_calls == 1
     assert not fake.frames
 
     # 打ち切りは動いている最中の失敗と同じく試行間隔を延ばす（演出中に OCR が毎ティック走らない）。
@@ -341,7 +342,7 @@ def test_session_aborts_when_screen_changes_during_recognition(monkeypatch) -> N
     card = _frame_with_card(40, 220)
     fake.frames = [card, card, card]
     ev = s.step()
-    assert ev.kind == "result" and full_calls == 1
+    assert ev.kind == "result" and full_calls == 2
     assert s.watcher.unstable_limit == 1  # 認識できたら元に戻る
 
 
@@ -352,9 +353,9 @@ def test_session_aborts_between_fast_path_and_full_pipeline(monkeypatch) -> None
     def identify_fast(frame: np.ndarray, full_frame: bool = False, cancel=None) -> IdentifyResult:  # noqa: ANN001
         return IdentifyResult(error="番号行が見つかりません（高速パス）")
 
-    # 変化領域の後の撮り直しは同じ画面、全画面の高速パスの後の撮り直しで変わっている
+    # 変化領域の後は撮り直さない。全画面の高速パスの後の撮り直しで画面が変わっている
     card = _frame_with_card(40, 220)
-    fake.frames = [_frame(40), card, card, _frame(200)]
+    fake.frames = [_frame(40), card, _frame(200)]
     s = WatchSession(fake.find, fake.refresh, fake.grab, fake.identify, identify_fast=identify_fast)
     s.step()
     ev = s.step()

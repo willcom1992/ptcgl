@@ -351,6 +351,9 @@ class WatchSession:
         """変化領域 → 全画面の高速パス → （あれば）通常パイプラインの順に試す。
 
         段階の切れ目で `cancel` を確認し、画面が変わっていれば `cancelled` 付きの結果を返す。
+        変化領域で見つからなかった直後は確認しない: ここでは文字の箱が分からず画面全体の差分で
+        判定することになり、盤面の演出だけで打ち切ってしまう（対戦ログで中断の約 1 割）。
+        全画面の高速パスが検出の直後に箱の中の差分で判定する。
         """
         if region is not None:
             sub = crop(frame, region)
@@ -366,8 +369,6 @@ class WatchSession:
                     result.error,
                     {k: round(v) for k, v in result.timings_ms.items()},
                 )
-                if cancel():
-                    return IdentifyResult.aborted()
         if self._identify_fast is not None:
             result = self._identify_fast(frame, full_frame=True, cancel=cancel)
             if result.ok or result.cancelled or self._identify is None:

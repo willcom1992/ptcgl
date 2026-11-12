@@ -315,8 +315,11 @@ class CardRepository:
                 best = card
                 break
 
+        # UI に出す候補一覧は保存済みの経路と同じ順（通常拡張 → その他、番号順）にそろえる。
+        # 発売日順は日本語ページを取りに行く順にだけ使う
         candidates = [
-            fetched.get(e.ref) or self.get_japanese_card(e.ref, fetch_page=False) for e in entries
+            fetched.get(e.ref) or self.get_japanese_card(e.ref, fetch_page=False)
+            for e in rank_candidates(en_page.jp_prints)
         ]
 
         if best is not None:
