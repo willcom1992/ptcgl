@@ -106,6 +106,7 @@ def rank_candidates(
     entries: tuple[PrintEntry, ...],
     en_release: str | None = None,
     jp_releases: Mapping[str, str] | None = None,
+    prefer_high_numbers: bool = False,
 ) -> list[PrintEntry]:
     """照合で日本語ページを取りに行く順。
 
@@ -114,6 +115,10 @@ def rank_candidates(
     日本語弾にある（対戦ログ 2026-11-12: 構築済みに何度も再録されたカードで 18 ページ目まで
     たどり 20 秒かかった）。発売日が分からない印刷はその後ろに、通常拡張パック → その他、
     番号の小さい順で並べる。
+
+    `prefer_high_numbers` は英語版が通常枠外の番号（イラストレア等、分母より大きい番号）の
+    とき。日本語版も同じ弾の枠外（番号の大きい方）にあるので、同じ発売日の中では番号の
+    大きい順にする（対戦ログ 2026-11-12: 3 枚とも通常枠を先に 2 ページ引いて 2 秒ずつ無駄だった）。
     """
     en_day = _to_date(en_release)
 
@@ -125,7 +130,8 @@ def rank_candidates(
         if en_day is None or jp_day is None:
             return (1, 0, 0, tier, number, e.ref.number)
         days = (en_day - jp_day).days
-        return (0, 0 if days >= 0 else 1, abs(days), tier, number, e.ref.number)
+        order = -number if prefer_high_numbers else number
+        return (0, 0 if days >= 0 else 1, abs(days), tier, order, e.ref.number)
 
     return sorted(entries, key=sort_key)
 
@@ -180,7 +186,9 @@ class CardRepository:
         except Exception as exc:  # 一覧が取れなくても照合は従来の順で続ける
             log.warning("日本語セット一覧の取得に失敗（候補は従来の順で試す）: %s", exc)
             return rank_candidates(prints)
-        ranked = rank_candidates(prints, en_set.release_date, releases)
+        digits = re.match(r"\d+", en_ref.number)
+        secret = digits is not None and int(digits.group(0)) > en_set.official > 0
+        ranked = rank_candidates(prints, en_set.release_date, releases, secret)
         log.info(
             "日本語候補 %d 件を %s（%s）の発売日に近い順に: %s",
             len(ranked),

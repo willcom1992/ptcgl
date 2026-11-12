@@ -141,6 +141,21 @@ def test_rank_candidates_prefers_prints_released_just_before_the_english_set() -
     ]
 
 
+def test_rank_candidates_prefers_high_numbers_for_secret_rares() -> None:
+    # ASC #288（分母 183 より大きいイラストレア）: 日本語版も M2a の枠外（244）にある
+    entries = (
+        PrintEntry(CardRef("jp", "M2a", "114"), "Mega Dream ex"),
+        PrintEntry(CardRef("jp", "M2a", "244"), "Mega Dream ex"),
+        PrintEntry(CardRef("jp", "MC", "489"), "Starter Decks 100"),
+    )
+    releases = {"M2a": "2025-11-28", "MC": "2025-12-19"}
+    ranked = [e.ref.key for e in rank_candidates(entries, "2026-01-30", releases, True)]
+    assert ranked == ["jp:MC:489", "jp:M2a:244", "jp:M2a:114"]
+    # 通常枠の番号なら同じ発売日の中は番号の小さい順のまま
+    ranked = [e.ref.key for e in rank_candidates(entries, "2026-01-30", releases)]
+    assert ranked == ["jp:MC:489", "jp:M2a:114", "jp:M2a:244"]
+
+
 def _recording_repo(tmp_path: Path, routes: dict[str, str]) -> tuple[CardRepository, list[str]]:
     requested: list[str] = []
 
