@@ -14,8 +14,8 @@ Pokémon TCG Live（PTCGL）の画面に表示される英語カードを認識�
 Python などのインストールは不要です。
 
 1. [Releases ページ](https://github.com/willcom1992/ptcgl/releases) を開き、最新版の「Assets」にある `ptcgl-windows.zip` をダウンロードします。
-2. zip を右クリック →「すべて展開」で展開し、できた `ptcgl` フォルダを好きな場所に置きます。
-3. PTCGL を起動してから、フォルダ内の `ptcgl.exe` をダブルクリックします。小さなウィンドウが開き、下部が「監視中」になれば準備完了です。
+2. zip を右クリック →「すべて展開」で展開し、できた `PTCGL 日本語カードビューア` フォルダを好きな場所に置きます。
+3. PTCGL を起動してから、フォルダ内の `PTCGL 日本語カードビューア.exe` をダブルクリックします。小さなウィンドウが開き、下部が「監視中」になれば準備完了です。
 4. PTCGL でカードを拡大表示（手札にマウスを乗せる、場のポケモンをクリックするなど）すると、約 1 秒で日本語版の画像が表示されます。
 
 初回起動時の警告への対処、画面の見方、認識できる画面、困ったときの対処は **[使い方ガイド](docs/usage.md)** の 1〜6 章にまとめています。
@@ -49,7 +49,7 @@ python -m ptcgl capture --window "TCG Live" --out shot.png
 pytest                             # テスト
 ruff check . ; ruff format .       # Lint / フォーマット
 mypy src                           # 型チェック
-pyinstaller packaging/ptcgl.spec   # 配布用ビルド（dist/ptcgl/ptcgl.exe）
+pyinstaller packaging/ptcgl.spec   # 配布用ビルド（dist/PTCGL 日本語カードビューア/）
 ```
 
 設定・キャッシュの保存先はユーザーごとのディレクトリです（`python -m ptcgl config-path` で表示）。
