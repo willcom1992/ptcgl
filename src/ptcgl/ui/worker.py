@@ -167,12 +167,13 @@ class RecognitionWorker(QObject):
         if event.kind == "result" and event.result is not None:
             r = event.result
             log.info(
-                "認識 %.0fms ok=%s en=%s region=%s stable=%s timings=%s error=%s",
+                "認識 %.0fms ok=%s en=%s region=%s stable=%s bg=%d timings=%s error=%s",
                 event.elapsed_ms,
                 r.ok,
                 r.en_ref,
                 f"{event.region.rw * event.region.rh:.2f}" if event.region else "full",
                 event.stable,
+                event.background_changes,
                 {k: round(v) for k, v in r.timings_ms.items()},
                 r.error,
             )
@@ -182,10 +183,12 @@ class RecognitionWorker(QObject):
         elif event.kind == "aborted":
             timings = event.result.timings_ms if event.result is not None else {}
             log.info(
-                "認識を中断 %.0fms（画面が変化）stable=%s timings=%s",
+                "認識を中断 %.0fms（画面が変化）stable=%s bg=%d timings=%s %s",
                 event.elapsed_ms,
                 event.stable,
+                event.background_changes,
                 {k: round(v) for k, v in timings.items()},
+                event.message,
             )
             self.status_changed.emit("監視中")
         elif event.kind in ("no_window", "minimized", "error"):

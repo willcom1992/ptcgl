@@ -14,11 +14,13 @@ from ptcgl.recognition.detector import CardBox
 from ptcgl.watch import (
     MAX_BACKOFF_TICKS,
     MAX_STABLE_BACKOFF_TICKS,
+    ChangeCanceller,
     FrameWatcher,
     WatchSession,
     _thumbnail,
     changed_region,
     frame_difference,
+    masked_difference,
 )
 
 
@@ -361,6 +363,51 @@ def test_session_aborts_between_fast_path_and_full_pipeline(monkeypatch) -> None
     ev = s.step()
     assert ev.kind == "aborted"
     assert fake.identify_calls == []  # 通常パイプラインは呼ばれない
+
+
+def test_masked_difference_limits_to_boxes() -> None:
+    a = np.zeros((90, 160), dtype=np.float32)
+    b = a.copy()
+    b[:, 80:] = 100  # 右半分だけ変化
+    assert masked_difference(a, b, [CardBox(0.0, 0.0, 0.5, 1.0)]) == 0.0
+    assert masked_difference(a, b, [CardBox(0.5, 0.0, 0.5, 1.0)]) == 100.0
+    assert masked_difference(a, b, []) is None
+    assert masked_difference(a, b[:45], [CardBox(0.0, 0.0, 1.0, 1.0)]) == 255.0
+
+
+def test_canceller_continues_when_only_background_changes(monkeypatch) -> None:  # noqa: ANN001
+    """詳細表示の背後で盤面の演出が続いても、文字の箱の中が変わらなければ打ち切らない。"""
+    monkeypatch.setattr(watch_mod, "CANCEL_CHECK_INTERVAL_S", 0.0)
+    card = _frame_with_card(40, 220)
+    background = _frame_with_card(120, 220)  # カードの外だけ明るくなった（演出）
+    gone = card.copy()
+    gone[200:600, 400:700] = 90  # カードの中が変わった（表示が消えた）
+    frames = [background, background, gone]
+    rect = (0, 0, 1280, 720)
+    text_boxes = [CardBox(400 / 1280, 200 / 720, 300 / 1280, 400 / 720)]
+
+    cancel = ChangeCanceller(lambda r: frames.pop(0), card, rect, threshold=4.0)
+    assert cancel(text_boxes) is False  # 画面全体は変わったが箱の中は不変
+    assert cancel.background_changes == 1
+    assert cancel.last_diff >= 4.0 and cancel.last_text_diff == 0.0
+    assert cancel() is True  # 箱が無ければ画面全体で判定する
+    assert cancel(text_boxes) is True  # 箱の中が変われば打ち切る
+    assert cancel.last_text_diff is not None and cancel.last_text_diff >= 4.0
+    assert cancel.background_changes == 1
+
+
+def test_canceller_rate_limits_and_tolerates_capture_errors(monkeypatch) -> None:  # noqa: ANN001
+    calls = 0
+
+    def grab(rect) -> np.ndarray:  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("capture failed")
+
+    cancel = ChangeCanceller(grab, _frame(40), (0, 0, 1280, 720), threshold=4.0)
+    assert cancel() is False and calls == 0  # 間隔内（autouse で 1e9 秒）は撮り直さない
+    monkeypatch.setattr(watch_mod, "CANCEL_CHECK_INTERVAL_S", 0.0)
+    assert cancel() is False and calls == 1  # 撮れなければ変わっていない扱い
 
 
 def test_session_resets_watcher_when_window_is_replaced() -> None:

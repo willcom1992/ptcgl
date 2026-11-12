@@ -9,9 +9,10 @@
   全画面 OCR（0.5〜1.5 秒）を省き、小さな領域の OCR（0.2〜0.4 秒）だけで済ませる。
   領域で見つからなければ全画面で再試行する
 - 認識の段階の切れ目で画面を撮り直し、認識中のフレームから画面が変わっていれば残りを打ち切る
-  （演出中の古いフレームに時間を使わず、次のティックで新しい画面を読む）。打ち切りでは基準フレームを
-  据え置き、動いている最中の失敗と同じく試行間隔だけ延ばす（演出が続く間に OCR が毎ティック
-  走らないようにする）
+  （演出中の古いフレームに時間を使わず、次のティックで新しい画面を読む）。ただし読んでいる文字の
+  箱の中が変わっていなければ続ける（詳細表示の背後で盤面の演出が続いても、カードは出たまま）。
+  打ち切りでは基準フレームを据え置き、動いている最中の失敗と同じく試行間隔だけ延ばす
+  （演出が続く間に OCR が毎ティック走らないようにする）
 - 静止していないフレームで失敗したときは基準フレームを更新しない（静止後に再度変化として拾う）。
   失敗が続いたら試行間隔を 1, 2, 4 … 回（上限 MAX_BACKOFF_TICKS）と倍々に延ばし、
   演出が続く盤面で OCR が走り続けないようにする
@@ -24,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import cv2
@@ -60,6 +61,23 @@ def frame_difference(a: np.ndarray, b: np.ndarray) -> float:
     if a.shape != b.shape:
         return 255.0
     return float(np.mean(np.abs(a - b)))
+
+
+def masked_difference(a: np.ndarray, b: np.ndarray, boxes: Sequence[CardBox]) -> float | None:
+    """`boxes`（比率座標）の内側だけで平均絶対差分を取る。箱が画素を持たなければ None。"""
+    if a.shape != b.shape:
+        return 255.0
+    h, w = a.shape[:2]
+    mask = np.zeros((h, w), dtype=bool)
+    for box in boxes:
+        x0 = min(max(int(box.rx * w), 0), w - 1)
+        y0 = min(max(int(box.ry * h), 0), h - 1)
+        x1 = min(max(int(np.ceil((box.rx + box.rw) * w)), x0 + 1), w)
+        y1 = min(max(int(np.ceil((box.ry + box.rh) * h)), y0 + 1), h)
+        mask[y0:y1, x0:x1] = True
+    if not mask.any():
+        return None
+    return float(np.mean(np.abs(a - b)[mask]))
 
 
 def changed_region(reference: np.ndarray, current: np.ndarray) -> CardBox | None:
@@ -204,6 +222,60 @@ class WatchEvent:
     elapsed_ms: float = 0.0
     region: CardBox | None = None
     stable: bool = True  # 認識したフレームが静止していたか（ログ用）
+    background_changes: int = 0  # 認識中に文字の箱の外だけが変わった回数（ログ用）
+
+
+class ChangeCanceller:
+    """認識中のフレームから画面が変わったかを、撮り直して判定する（高速パスの `cancel`）。
+
+    撮り直しは CANCEL_CHECK_INTERVAL_S に 1 回まで。撮れなければ変わっていない扱いにする。
+    `boxes`（読んでいる文字の箱。フレーム比率）が渡されたときは、画面全体が変わっていても
+    箱の中が変わっていなければ続ける。詳細表示の背後で盤面の演出が続く間に、出たままのカードの
+    認識を何度も打ち切らないため（対戦ログで 8 回連続の打ち切りが 2 件あり、表示まで 12〜16 秒
+    かかっていた）。
+    """
+
+    def __init__(
+        self,
+        grab: Callable[[tuple[int, int, int, int]], np.ndarray],
+        frame: np.ndarray,
+        rect: tuple[int, int, int, int],
+        threshold: float,
+    ) -> None:
+        self._grab = grab
+        self._rect = rect
+        self._reference = _thumbnail(frame)
+        self._threshold = threshold
+        self._last_check = time.monotonic()
+        self.last_diff = 0.0  # 最後の撮り直しでの画面全体の差分
+        # 同じく文字の箱の中だけの差分（箱が無ければ None）
+        self.last_text_diff: float | None = None
+        self.background_changes = 0  # 画面全体は変わったが箱の中は変わらず、続行した回数
+
+    def __call__(self, boxes: Sequence[CardBox] | None = None) -> bool:
+        now = time.monotonic()
+        if now - self._last_check < CANCEL_CHECK_INTERVAL_S:
+            return False
+        self._last_check = now
+        try:
+            current = _thumbnail(self._grab(self._rect))
+        except Exception:
+            return False
+        self.last_diff = frame_difference(self._reference, current)
+        self.last_text_diff = None
+        if self.last_diff < self._threshold:
+            return False
+        if boxes:
+            self.last_text_diff = masked_difference(self._reference, current, boxes)
+            if self.last_text_diff is not None and self.last_text_diff < self._threshold:
+                self.background_changes += 1
+                log.debug(
+                    "画面は変化したが文字の箱の中は不変なので続行: diff=%.1f text_diff=%.1f",
+                    self.last_diff,
+                    self.last_text_diff,
+                )
+                return False
+        return True
 
 
 class WatchSession:
@@ -260,32 +332,12 @@ class WatchSession:
             self._ticks_until_search = WINDOW_SEARCH_EVERY_TICKS - 1
         return found
 
-    def _make_cancel(
-        self, frame: np.ndarray, rect: tuple[int, int, int, int]
-    ) -> Callable[[], bool]:
-        """認識中のフレームから画面が変わったかを、撮り直して判定する関数を返す。
-
-        撮り直しは CANCEL_CHECK_INTERVAL_S に 1 回まで。撮れなければ変わっていない扱いにする。
-        """
-        reference = _thumbnail(frame)
-        last_check = time.monotonic()
-
-        def cancel() -> bool:
-            nonlocal last_check
-            now = time.monotonic()
-            if now - last_check < CANCEL_CHECK_INTERVAL_S:
-                return False
-            last_check = now
-            try:
-                current = self._grab(rect)
-            except Exception:
-                return False
-            return frame_difference(reference, _thumbnail(current)) >= self.watcher.change_threshold
-
-        return cancel
+    def _make_cancel(self, frame: np.ndarray, rect: tuple[int, int, int, int]) -> ChangeCanceller:
+        """認識中のフレームから画面が変わったかを、撮り直して判定する関数を返す。"""
+        return ChangeCanceller(self._grab, frame, rect, self.watcher.change_threshold)
 
     def _recognize(
-        self, frame: np.ndarray, region: CardBox | None, cancel: Callable[[], bool]
+        self, frame: np.ndarray, region: CardBox | None, cancel: ChangeCanceller
     ) -> IdentifyResult:
         """変化領域 → 全画面の高速パス → （あれば）通常パイプラインの順に試す。
 
@@ -348,18 +400,22 @@ class WatchSession:
             self.watcher.mark_recognized(frame, found=False)
             return WatchEvent("error", "認識に失敗しました")
         elapsed = (time.perf_counter() - t0) * 1000
+        message = result.error or ""
         if result.cancelled:
             # 基準フレームは据え置く（次のティックで新しい画面を変化として読む）。試行間隔は延ばす
             self.watcher.mark_aborted()
             kind = "aborted"
+            text_diff = "-" if cancel.last_text_diff is None else f"{cancel.last_text_diff:.1f}"
+            message = f"{message} diff={cancel.last_diff:.1f} text_diff={text_diff}"
         else:
             self.watcher.mark_recognized(frame, found=result.ok)
             kind = "result"
         return WatchEvent(
             kind,
-            result.error or "",
+            message,
             result=result,
             elapsed_ms=elapsed,
             region=decision.region,
             stable=decision.stable,
+            background_changes=cancel.background_changes,
         )

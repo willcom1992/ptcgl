@@ -27,12 +27,13 @@ from ptcgl.config import data_dir  # noqa: E402
 
 _RESULT_RE = re.compile(
     r"^(?P<ts>\S+ \S+) INFO ptcgl\.ui\.worker: 認識 (?P<ms>\d+)ms ok=(?P<ok>\w+) en=(?P<en>.*?) "
-    r"region=(?P<region>\S+) (?:stable=(?P<stable>\w+) )?timings=(?P<timings>\{.*?\}) "
-    r"error=(?P<error>.*)$"
+    r"region=(?P<region>\S+) (?:stable=(?P<stable>\w+) )?(?:bg=(?P<bg>\d+) )?"
+    r"timings=(?P<timings>\{.*?\}) error=(?P<error>.*)$"
 )
 _ABORT_RE = re.compile(
-    r"^(?P<ts>\S+ \S+) INFO ptcgl\.ui\.worker: 認識を中断 (?P<ms>\d+)ms.*"
-    r"timings=(?P<timings>\{.*\})$"
+    r"^(?P<ts>\S+ \S+) INFO ptcgl\.ui\.worker: 認識を中断 (?P<ms>\d+)ms.*?"
+    r"(?:bg=(?P<bg>\d+) )?timings=(?P<timings>\{.*?\})"
+    r"(?: .*diff=(?P<diff>[\d.]+) text_diff=(?P<text_diff>\S+))?$"
 )
 _TS_FORMAT = "%Y-%m-%d %H:%M:%S,%f"
 
@@ -67,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[dict] = []
     aborts: list[float] = []
+    abort_diffs: list[tuple[float, float | None]] = []  # 中断時の (画面全体, 文字の箱の中) の差分
+    background_changes = 0  # 画面は変わったが文字の箱の中は不変で続行した回数
     for line in args.log.read_text(encoding="utf-8", errors="replace").splitlines():
         if args.since and line[: len(args.since)] < args.since:
             continue
@@ -82,10 +85,15 @@ def main(argv: list[str] | None = None) -> int:
                     "error": m["error"],
                 }
             )
+            background_changes += int(m["bg"] or 0)
             continue
         m = _ABORT_RE.match(line)
         if m:
             aborts.append(int(m["ms"]))
+            background_changes += int(m["bg"] or 0)
+            if m["diff"]:
+                text_diff = None if m["text_diff"] == "-" else float(m["text_diff"])
+                abort_diffs.append((float(m["diff"]), text_diff))
 
     print(f"ログ: {args.log}")
     print(f"認識: {len(results)} 回, 中断: {len(aborts)} 回")
@@ -100,6 +108,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"  {label}: {len(values):4d} 回  合計 {sum(values) / 1000:6.0f} 秒"
                 f"  中央値 {median:5.0f} ms  p90 {p90:5.0f} ms"
             )
+
+    if background_changes or abort_diffs:
+        print(f"\n文字の箱の外だけが変わって続行した回数: {background_changes}")
+    if abort_diffs:
+        whole = [d for d, _ in abort_diffs]
+        text = [t for _, t in abort_diffs if t is not None]
+        line = f"中断時の差分: 画面全体 中央値 {statistics.median(whole):.1f} 最小 {min(whole):.1f}"
+        if text:
+            line += f" / 文字の箱の中 中央値 {statistics.median(text):.1f} 最小 {min(text):.1f}"
+        print(line)
 
     print("\n経路別（成功した認識）:")
     by_path: dict[str, list[float]] = defaultdict(list)

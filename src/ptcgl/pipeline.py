@@ -14,7 +14,7 @@ import logging
 import re
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import cv2
@@ -92,6 +92,10 @@ def _normalize_set_code(raw: str) -> str | None:
             if 2 <= len(cand) <= 4 and find_set(cand):
                 return cand
     return None
+
+
+# 常駐モードの中断判定。読んでいる文字の箱（フレーム比率）を受け取り、打ち切るなら True
+CancelCheck = Callable[[Sequence[CardBox] | None], bool]
 
 
 @dataclass
@@ -349,19 +353,32 @@ class Pipeline:
         return None
 
     @staticmethod
-    def _cancelled(cancel: Callable[[], bool] | None, result: IdentifyResult) -> bool:
-        """呼び出し側（常駐モード）が中断を求めていれば結果に印を付けて True。"""
-        if cancel is not None and cancel():
+    def _cancelled(
+        cancel: CancelCheck | None, result: IdentifyResult, boxes: Sequence[CardBox]
+    ) -> bool:
+        """呼び出し側（常駐モード）が中断を求めていれば結果に印を付けて True。
+
+        `boxes` は読んでいる文字の箱（フレーム比率）。呼び出し側はこの中が変わったかで判定できる。
+        """
+        if cancel is not None and cancel(boxes):
             result.cancelled = True
             result.error = IdentifyResult.ABORT_MESSAGE
             return True
         return False
 
+    @staticmethod
+    def _boxes_to_ratio(boxes: list[Box], width: int, height: int) -> list[CardBox]:
+        out: list[CardBox] = []
+        for b in boxes:
+            x0, y0, x1, y1 = box_rect(b)
+            out.append(CardBox(x0 / width, y0 / height, (x1 - x0) / width, (y1 - y0) / height))
+        return out
+
     def identify_fast(
         self,
         frame_bgr: np.ndarray,
         full_frame: bool = False,
-        cancel: Callable[[], bool] | None = None,
+        cancel: CancelCheck | None = None,
         _depth: int = 0,
     ) -> IdentifyResult:
         """文字検出 + 選択的な認識で、画面のカードを最短で特定する（常駐モードの主経路）。
@@ -374,8 +391,9 @@ class Pipeline:
            b. HP バッジ（小さな表示も含む）の右端からカード領域を推定し、拡大して番号を読み直す
               （画面幅の 2 割程度の手札ホバーは番号が 8px で全画面の検出では途切れる）
            c. 3 段目: 残りの箱をすべて認識して番号行を探す（通常パイプラインの全行認識と同じ範囲）
-        `cancel` は段階の切れ目で呼ばれ、True を返すと残りを省いて `cancelled` 付きの結果を返す
-        （画面が変わってしまった古いフレームに時間を使わないため）。番号行の 1〜2 段目は中断しない。
+        `cancel` は段階の切れ目で、検出した文字の箱（フレーム比率）を添えて呼ばれ、True を返すと
+        残りを省いて `cancelled` 付きの結果を返す（画面が変わってしまった古いフレームに時間を
+        使わないため）。番号行の 1〜2 段目は中断しない。
         """
         result = IdentifyResult()
         h, w = frame_bgr.shape[:2]
@@ -401,7 +419,8 @@ class Pipeline:
         result.timings_ms["ocr_number"] = (time.perf_counter() - t1) * 1000
         fallback_error: str | None = None
         if anchor is None and _depth == 0 and full_frame:
-            if self._cancelled(cancel, result):
+            text_boxes = self._boxes_to_ratio(boxes, w, h)
+            if self._cancelled(cancel, result, text_boxes):
                 return result
             # a. HP バッジアンカー（番号が隠れる詳細表示）。大きな箱を読み、名前・HP で検索する
             t2 = time.perf_counter()
@@ -417,7 +436,7 @@ class Pipeline:
             rois = self._hp_badge_rois(frame_bgr, hp_lines)
             result.hp_badge_rois = len(rois)
             for roi in rois:
-                if self._cancelled(cancel, result):
+                if self._cancelled(cancel, result, text_boxes):
                     return result
                 sub = self._identify_roi(frame_bgr, roi)
                 if sub is not None:
@@ -428,7 +447,7 @@ class Pipeline:
             result.timings_ms["hp_roi"] = (time.perf_counter() - t3) * 1000
             # c. 3 段目: 残りの箱をすべて読む。全行認識（通常パイプラインのパス 1）と同じ範囲を
             # 検出をやり直さずに済ませる。小さい順に読み、上限を超える大きな箱は省く
-            if self._cancelled(cancel, result):
+            if self._cancelled(cancel, result, text_boxes):
                 return result
             t4 = time.perf_counter()
             rest = sorted(

@@ -266,7 +266,15 @@ def test_fast_path_stops_when_cancelled_between_stages(tmp_path: Path) -> None:
     boxes = {"label": _box(60, 160, 180, 180), "hp": _box(1200, 100, 1300, 140)}
     ocr = _FakeOcr(boxes, {"label": "Basic", "hp": "110"})
     frame = np.zeros((1000, 1600, 3), dtype=np.uint8)
-    result = _pipeline(tmp_path, ocr).identify_fast(frame, full_frame=True, cancel=lambda: True)
+    seen: list[list] = []
+
+    def cancel(boxes=None) -> bool:  # noqa: ANN001
+        seen.append(list(boxes or []))
+        return True
+
+    result = _pipeline(tmp_path, ocr).identify_fast(frame, full_frame=True, cancel=cancel)
     assert result.cancelled and not result.ok
+    assert len(seen) == 1 and len(seen[0]) == 2  # 検出した文字の箱（比率）を添えて判定を呼ぶ
+    assert all(0.0 <= b.rx <= 1.0 and 0.0 < b.rw <= 1.0 for b in seen[0])
     assert ocr.detect_calls == [1600]  # 番号行の段階だけ行い、HP バッジの段階に進まない
     assert "hp_badge" not in result.timings_ms
