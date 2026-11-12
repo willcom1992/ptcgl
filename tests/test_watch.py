@@ -13,7 +13,7 @@ from ptcgl.pipeline import IdentifyResult
 from ptcgl.recognition.detector import CardBox
 from ptcgl.watch import (
     MAX_BACKOFF_TICKS,
-    MAX_STABLE_BACKOFF_TICKS,
+    STABLE_FAILURE_WAIT_TICKS,
     ChangeCanceller,
     FrameWatcher,
     WatchSession,
@@ -130,8 +130,8 @@ def test_watcher_stable_failure_updates_reference() -> None:
     assert w.unstable_limit == 1
 
 
-def test_watcher_backs_off_after_repeated_stable_failures() -> None:
-    # 演出の合間に静止する盤面: 静止画面での失敗が続くと、次の変化から 2, 4, 8 ティック待つ
+def test_watcher_waits_briefly_after_stable_failures() -> None:
+    # 演出の合間に静止する盤面: 静止画面で失敗した後は、次の変化から一定ティック待つ（倍々にしない）
     w = FrameWatcher(change_threshold=4.0, stable_threshold=1.5)
     w.decide(_frame(40))
     value = 40
@@ -150,14 +150,11 @@ def test_watcher_backs_off_after_repeated_stable_failures() -> None:
     d = w.decide(_frame(value))
     assert d.recognize is True and d.stable is True  # 静止したので待たずに読む
     w.mark_recognized(_frame(value), found=False)  # 静止画面での失敗 1 回目
-    assert w.stable_limit == 2
+    assert w.stable_limit == STABLE_FAILURE_WAIT_TICKS == 2
     assert change_and_count() == 2
-    w.mark_recognized(_frame(value), found=False)  # 2 回目
-    assert change_and_count() == 4
-    w.mark_recognized(_frame(value), found=False)  # 3 回目
-    assert change_and_count() == 8
-    w.mark_recognized(_frame(value), found=False)  # 4 回目: 上限
-    assert change_and_count() == MAX_STABLE_BACKOFF_TICKS
+    for _ in range(3):  # 続いても延びない（手札に乗せたカードの表示が 2 秒待たされていた）
+        w.mark_recognized(_frame(value), found=False)
+        assert change_and_count() == 2
     w.mark_recognized(_frame(value), found=True)  # 見つかれば元に戻る
     assert w.stable_limit == 0 and w.unstable_limit == 1
     assert change_and_count() == 1

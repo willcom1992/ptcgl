@@ -17,8 +17,9 @@
   失敗が続いたら試行間隔を 1, 2, 4 … 回（上限 MAX_BACKOFF_TICKS）と倍々に延ばし、
   演出が続く盤面で OCR が走り続けないようにする
 - 静止したフレームで認識したら成否にかかわらず基準にし、画面が変わるまで再試行しない。
-  静止画面での失敗が続く場合（演出の合間に止まる盤面）は、次に画面が変化してから 2, 4, 8 回
-  （上限 MAX_STABLE_BACKOFF_TICKS）だけ待って試す
+  静止画面で失敗した直後（演出の合間に止まる盤面）は、次に画面が変化してから
+  STABLE_FAILURE_WAIT_TICKS（既定 0.5 秒）だけ待って試す。倍々に延ばさない（対戦ログでは
+  表示切替の 2 割が最大 2 秒の待ちに当たり、認識そのものより長かった）
 """
 
 from __future__ import annotations
@@ -42,7 +43,8 @@ _REGION_PIXEL_THRESHOLD = 24  # 変化した画素とみなす輝度差（0-255�
 _REGION_PAD_RATIO = 0.04  # 変化領域の外側に足す余白（フレーム比）
 MAX_REGION_AREA = 0.6  # これより広く変化していれば全画面扱い
 MAX_BACKOFF_TICKS = 40
-MAX_STABLE_BACKOFF_TICKS = 8  # 静止画面での連続失敗後に待つ最大ティック数（既定 2 秒）
+# 静止画面での失敗後、次の変化から認識までに待つティック数（既定 0.5 秒）
+STABLE_FAILURE_WAIT_TICKS = 2
 WINDOW_SEARCH_EVERY_TICKS = 8  # PTCGL が見つからない間は 8 ティック（既定 2 秒）に 1 回だけ探す
 CANCEL_CHECK_INTERVAL_S = 0.15  # 中断判定のための撮り直しは最短でもこの間隔を空ける
 
@@ -139,10 +141,12 @@ class FrameWatcher:
 
     @property
     def stable_limit(self) -> int:
-        """静止した画面で次の認識を試みるまでの待ち回数。失敗していなければ待たない。"""
-        if self._stable_failures == 0:
-            return 0
-        return min(2**self._stable_failures, MAX_STABLE_BACKOFF_TICKS)
+        """静止した画面で失敗した後、次の変化から認識までに待つ回数。失敗していなければ待たない。
+
+        倍々に延ばさない。対戦ログ（2026-11-12）で表示切替 121 回のうち 2 割が上限 8 ティック
+        （2 秒）の待ちに当たり、認識そのもの（0.6〜1 秒）より長かった。
+        """
+        return STABLE_FAILURE_WAIT_TICKS if self._stable_failures else 0
 
     def decide(self, frame_bgr: np.ndarray) -> Decision:
         thumb = _thumbnail(frame_bgr)
