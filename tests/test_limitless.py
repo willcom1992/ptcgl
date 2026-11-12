@@ -84,3 +84,30 @@ def test_image_url_builders() -> None:
 def test_parse_rejects_non_card_page() -> None:
     with pytest.raises(ValueError):
         parse_card_page("<html><head><title>Limitless</title></head></html>")
+
+
+def test_parse_jp_set_index_reads_release_dates() -> None:
+    from ptcgl.data.limitless import parse_jp_set_index
+
+    dates = parse_jp_set_index(load("jp_sets.html"))
+    assert dates["SLD"] == "2022-02-25"
+    assert dates["SV1V"] == "2023-01-20"
+    assert dates["M6a"] == "2026-09-16"
+    assert "MP" not in dates  # プロモは発売日の欄が空
+    with pytest.raises(ValueError):
+        parse_jp_set_index("<html><body><p>maintenance</p></body></html>")
+
+
+def test_name_variants_strip_glued_suffix_only_from_last_word() -> None:
+    from ptcgl.data.limitless import name_variants
+
+    # 詳細表示で "Oricorio ex" が "Oricorioe" / "Oricorioex" と読まれる
+    assert name_variants("Oricorioe") == ["Oricorioe", "Oricorio"]
+    assert name_variants("Oricorioex") == ["Oricorioex", "Oricorio"]
+    assert name_variants("Team Rockets Mewtwoex") == [
+        "Team Rockets Mewtwoex",
+        "Team Rockets Mewtwo",
+    ]
+    # 空白で分かれた "ex" や、語尾の無い名前には手を付けない
+    assert name_variants("Charizard ex") == ["Charizard ex"]
+    assert name_variants("Pikachu") == ["Pikachu"]

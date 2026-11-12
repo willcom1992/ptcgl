@@ -70,7 +70,8 @@ FAST_HP_NAME_MAX_GAP = 0.25  # 名前行の右端から HP バッジまでの最
 FAILED_ROI_CACHE_SIZE = 16
 FAILED_ROI_TTL_S = 120.0  # これより古い記憶は使わない（盤面はターンごとに変わる）
 FAILED_ROI_POS_TOLERANCE = 0.01
-FAILED_ROI_MAX_DIFF = 10.0
+# 対戦ログ（2026-11-12）: 盤面の演出で差分 10〜20 の領域が 105 件あり、読み直しても番号は無かった
+FAILED_ROI_MAX_DIFF = 20.0
 FAILED_ROI_THUMB_SIZE = (24, 32)
 # 2〜3 桁の数字で終わる（HP バッジ）。"39:00" のタイマーや "076/132" の番号は除く
 _TRAILING_HP_RE = re.compile(r"(?<![\d/:])(\d{2,3})\s*$")
@@ -548,6 +549,12 @@ class Pipeline:
         sub = self.identify_fast(crop(frame_bgr, roi), _depth=1)
         if sub.ok:
             sub.card_box = to_frame_box(sub.card_box, roi)
+            # 省略のしきい値（FAILED_ROI_MAX_DIFF）を決める材料: 読めた領域と記憶との差分
+            log.info(
+                "HP バッジ領域の拡大読み直しで番号を発見: %s（記憶との差分 %s）",
+                sub.en_ref,
+                None if diff is None else round(diff),
+            )
             return sub
         if sub.en_ref is None:
             self._remember_failed_roi(frame_bgr, roi)

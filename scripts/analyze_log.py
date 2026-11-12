@@ -39,7 +39,22 @@ _ROI_RE = re.compile(
     r"HP バッジ領域の拡大読み直しで番号なし: (?P<n>\d+) 件（省略 (?P<skipped>\d+), "
     r"記憶との差分 (?P<diffs>\[.*?\]), (?P<ms>\d+)ms）"
 )
+_ROI_OK_RE = re.compile(
+    r"HP バッジ領域の拡大読み直しで番号を発見: .*（記憶との差分 (?P<diff>None|\d+)）"
+)
 _TS_FORMAT = "%Y-%m-%d %H:%M:%S,%f"
+
+
+def _diff_bucket(d: float | None) -> str:
+    if d is None:
+        return "記憶なし"
+    if d < 10:
+        return "<10"
+    if d < 20:
+        return "10-20"
+    if d < 40:
+        return "20-40"
+    return ">=40"
 
 
 def classify(timings: dict[str, float]) -> str:
@@ -77,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     roi_rois = roi_skipped = 0  # HP バッジ領域の拡大読み直し（失敗）の件数と、記憶で省いた件数
     roi_ms: list[float] = []
     roi_diffs: Counter[str] = Counter()  # 記憶との差分の分布
+    roi_ok_diffs: Counter[str] = Counter()  # 読めた領域の、記憶との差分の分布
     for line in args.log.read_text(encoding="utf-8", errors="replace").splitlines():
         if args.since and line[: len(args.since)] < args.since:
             continue
@@ -108,16 +124,11 @@ def main(argv: list[str] | None = None) -> int:
             roi_skipped += int(m["skipped"])
             roi_ms.append(int(m["ms"]))
             for d in ast.literal_eval(m["diffs"]):
-                if d is None:
-                    roi_diffs["記憶なし"] += 1
-                elif d < 10:
-                    roi_diffs["<10"] += 1
-                elif d < 20:
-                    roi_diffs["10-20"] += 1
-                elif d < 40:
-                    roi_diffs["20-40"] += 1
-                else:
-                    roi_diffs[">=40"] += 1
+                roi_diffs[_diff_bucket(d)] += 1
+            continue
+        m = _ROI_OK_RE.search(line)
+        if m:
+            roi_ok_diffs[_diff_bucket(None if m["diff"] == "None" else int(m["diff"]))] += 1
 
     print(f"ログ: {args.log}")
     print(f"認識: {len(results)} 回, 中断: {len(aborts)} 回")
@@ -150,6 +161,10 @@ def main(argv: list[str] | None = None) -> int:
             f" 合計 {sum(roi_ms) / 1000:.0f} 秒"
         )
         print("  記憶との差分:", dict(roi_diffs.most_common()))
+    if roi_ok_diffs:
+        # 成功側の差分が省略のしきい値（FAILED_ROI_MAX_DIFF）より大きければ、しきい値は安全
+        print(f"HP バッジ領域の読み直し（成功）: {sum(roi_ok_diffs.values())} 回")
+        print("  記憶との差分:", dict(roi_ok_diffs.most_common()))
 
     print("\n経路別（成功した認識）:")
     by_path: dict[str, list[float]] = defaultdict(list)

@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 
 from bs4 import BeautifulSoup, Tag
 
 BASE_URL = "https://limitlesstcg.com"
+JP_SETS_URL = f"{BASE_URL}/cards/jp"  # 日本語セット一覧（発売日つき）
 CDN_BASE = "https://limitlesstcg.nyc3.cdn.digitaloceanspaces.com"
 
 # 例: "Pineco - Scarlet & Violet (SVI) #1 – Limitless"
@@ -128,6 +130,27 @@ def normalize_search_text(text: str) -> str:
     return " ".join(_CAMEL_SPLIT_RE.sub(" ", word) for word in text.split())
 
 
+# 末尾の語が「3 文字以上の名前 + ex 等」の形。"ex" だけの語（"Charizard ex"）には当たらない
+_GLUED_SUFFIX_RE = re.compile(
+    r"^(?P<base>[A-Za-z][A-Za-z'’.\-]+?[a-z])(?:ex|e|x|v|vmax|vstar|gx)$", re.IGNORECASE
+)
+
+
+def name_variants(name: str) -> list[str]:
+    """名前の末尾に続けて読まれた "ex" 等を外した候補。先頭は元の名前。
+
+    対戦ログ（2026-11-12）で "Oricorio ex" が "Oricorioe" / "Oricorioex" と読まれ、
+    名前と HP の検索が 9 回続けて 0 件だった。元の名前で 0 件のときだけ使う。
+    """
+    variants = [name]
+    words = name.split()
+    if words:
+        m = _GLUED_SUFFIX_RE.match(words[-1])
+        if m:
+            variants.append(" ".join([*words[:-1], m.group("base")]))
+    return variants
+
+
 def build_search_query(
     name: str,
     hp: int | None = None,
@@ -169,6 +192,66 @@ def parse_search_results(html: str) -> tuple[list[CardRef], int | None]:
             seen.add(ref)
             refs.append(ref)
     return refs, count
+
+
+_MONTHS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+_SHORT_DATE_RE = re.compile(r"^(\d{1,2}) ([A-Za-z]{3}) (\d{2})$")
+_JP_SET_HREF_RE = re.compile(r"^/cards/jp/([A-Za-z0-9-]{1,16})/?$")
+
+
+def _parse_short_date(text: str) -> str | None:
+    """Limitless のセット一覧の日付（"25 Feb 22"）を YYYY-MM-DD にする。読めなければ None。"""
+    m = _SHORT_DATE_RE.match(text.strip())
+    if m is None:
+        return None
+    month = _MONTHS.get(m.group(2).lower())
+    if month is None:
+        return None
+    try:
+        return date(2000 + int(m.group(3)), month, int(m.group(1))).isoformat()
+    except ValueError:
+        return None
+
+
+def parse_jp_set_index(html: str) -> dict[str, str]:
+    """日本語セット一覧（/cards/jp）から セットコード → 発売日（YYYY-MM-DD）を取る。
+
+    発売日の欄が空のセット（プロモ等）は含めない。表が無い（メンテナンス画面等）なら ValueError。
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", class_="sets-table")
+    if table is None:
+        raise ValueError("日本語セット一覧の表が見つかりません")
+    dates: dict[str, str] = {}
+    for row in table.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            continue
+        link = cells[0].find("a", href=True)
+        if link is None:
+            continue
+        m = _JP_SET_HREF_RE.match(str(link["href"]))
+        if m is None:
+            continue
+        released = _parse_short_date(_text(cells[1]))
+        if released is not None:
+            dates[m.group(1)] = released
+    if not dates:
+        raise ValueError("日本語セット一覧に発売日のあるセットがありません")
+    return dates
 
 
 def _text(tag: Tag | None) -> str:

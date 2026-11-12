@@ -38,7 +38,7 @@ Pokémon TCG Live（PTCGL）は英語版しか提供されていない。対戦�
 ## データソース
 | 用途 | ソース | 備考 |
 | --- | --- | --- |
-| 英→日対応付け・カード情報 | [Limitless TCG](https://limitlesstcg.com/cards) | API なし。英語カードページの「JP. Prints」と日本語ページの「Int. Prints」を HTML 解析。robots.txt に制限なし |
+| 英→日対応付け・カード情報 | [Limitless TCG](https://limitlesstcg.com/cards) | API なし。英語カードページの「JP. Prints」と日本語ページの「Int. Prints」を HTML 解析。日本語セットの発売日は `/cards/jp` の一覧（7 日キャッシュ）。robots.txt に制限なし |
 | 日本語カード画像 | Limitless の CDN（`limitlesstcg.nyc3.cdn.digitaloceanspaces.com/tpc/...`） | 出典は pokemon-card.com。**個人利用・ローカルキャッシュのみ。再配布しない** |
 | 英語セット表（略号・番号の分母） | [TCGdex API](https://tcgdex.dev/) `/v2/en/sets/{id}` | `scripts/build_en_sets.py` で `en_sets.json` を生成して同梱 |
 | 英語セット表の更新配信 | このリポジトリの main（`raw.githubusercontent.com/.../en_sets.json`） | 起動時に 1 日 1 回だけ取得。失敗時は同梱版を使う。新弾のたびに配布物を作り直さないため |

@@ -119,3 +119,14 @@ def test_parse_search_results_riolu_unique() -> None:
         (FIXTURES / "search_riolu_hp80.html").read_text(encoding="utf-8")
     )
     assert refs == [CardRef("en", "ASC", "112")]
+
+
+def test_search_english_retries_without_glued_suffix(tmp_path: Path) -> None:
+    a = CardRef("en", "PFL", "18")
+    repo, queries = _repo_with_results(tmp_path, {"Oricorio hp:190 unique:cards": [a]})
+    # 詳細表示で "Oricorio ex" が "Oricorioex" と読まれる。0 件なら末尾の ex を外して引き直す
+    assert repo.search_english("Oricorioex", 190, ["Excited Turbo"]) == [a]
+    assert queries == ["Oricorioex hp:190 unique:cards", "Oricorio hp:190 unique:cards"]
+    # 外せる語尾が無ければ 1 回だけ
+    assert repo.search_english("Pikachu", 60, []) == []
+    assert queries[2:] == ["Pikachu hp:60 unique:cards"]

@@ -8,27 +8,36 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from ptcgl.data.cache import CachedHttpClient
 from ptcgl.data.limitless import (
+    JP_SETS_URL,
     CardPage,
     CardRef,
     PrintEntry,
     build_search_query,
     jp_image_url,
+    name_variants,
     normalize_search_text,
     parse_card_page,
+    parse_jp_set_index,
     parse_search_results,
     search_url,
 )
 from ptcgl.data.mapping import MappingRecord, MappingStore
+from ptcgl.data.sets import find_set
 
 log = logging.getLogger(__name__)
 
 # Limitless のページ（JP. Prints は新弾で増える）は 7 日で取り直す。画像は不変
 PAGE_MAX_AGE_SECONDS = 7 * 24 * 3600
+# 日本語セット一覧（発売日）も新弾で増えるだけなので 7 日で取り直す
+JP_SETS_MAX_AGE_SECONDS = 7 * 24 * 3600
 
 # 日本語の通常拡張パック（SV1S, SV2a, SV10, M1L, M2a ...）。プロモ・構築済みより優先する
 _MAIN_EXPANSION_RE = re.compile(r"^(SV|M)\d+[A-Za-z]?$")
@@ -86,14 +95,37 @@ def same_illustrator(a: str | None, b: str | None) -> bool:
     return bool(na) and na == nb
 
 
-def rank_candidates(entries: tuple[PrintEntry, ...]) -> list[PrintEntry]:
-    """照合の優先順: 通常拡張パック → その他、同一枠内は番号の小さい順。"""
+def _to_date(text: str | None) -> date | None:
+    try:
+        return date.fromisoformat(text) if text else None
+    except ValueError:
+        return None
 
-    def sort_key(e: PrintEntry) -> tuple[int, int, str]:
+
+def rank_candidates(
+    entries: tuple[PrintEntry, ...],
+    en_release: str | None = None,
+    jp_releases: Mapping[str, str] | None = None,
+) -> list[PrintEntry]:
+    """照合で日本語ページを取りに行く順。
+
+    英語版と日本語セットの発売日（YYYY-MM-DD）が分かる印刷は、英語版より前に出たものを
+    近い順に、次に英語版より後に出たものを近い順に並べる。同一絵柄はたいてい英語版の直前の
+    日本語弾にある（対戦ログ 2026-11-12: 構築済みに何度も再録されたカードで 18 ページ目まで
+    たどり 20 秒かかった）。発売日が分からない印刷はその後ろに、通常拡張パック → その他、
+    番号の小さい順で並べる。
+    """
+    en_day = _to_date(en_release)
+
+    def sort_key(e: PrintEntry) -> tuple[int, int, int, int, int, str]:
         tier = 0 if _MAIN_EXPANSION_RE.match(e.ref.set_code) else 1
         digits = re.match(r"\d+", e.ref.number)
         number = int(digits.group(0)) if digits else 10**6
-        return (tier, number, e.ref.number)
+        jp_day = _to_date((jp_releases or {}).get(e.ref.set_code))
+        if en_day is None or jp_day is None:
+            return (1, 0, 0, tier, number, e.ref.number)
+        days = (en_day - jp_day).days
+        return (0, 0 if days >= 0 else 1, abs(days), tier, number, e.ref.number)
 
     return sorted(entries, key=sort_key)
 
@@ -110,6 +142,7 @@ class CardRepository:
         self._http = http
         self._images_dir = images_dir
         self._mapping = mapping
+        self._jp_releases: tuple[float, dict[str, str]] | None = None  # (取得時刻, 表)
 
     # --- Limitless ページ取得 -------------------------------------------------
 
@@ -120,6 +153,42 @@ class CardRepository:
         except ValueError:
             self._http.invalidate(ref.page_url)  # メンテナンス画面等を保存し続けない
             raise
+
+    def jp_release_dates(self) -> dict[str, str]:
+        """日本語セットの発売日（セットコード → YYYY-MM-DD）。一覧ページは 7 日ごとに取り直す。"""
+        now = time.monotonic()
+        if self._jp_releases is None or now - self._jp_releases[0] > JP_SETS_MAX_AGE_SECONDS:
+            html = self._http.get_text(JP_SETS_URL, max_age=JP_SETS_MAX_AGE_SECONDS)
+            try:
+                self._jp_releases = (now, parse_jp_set_index(html))
+            except ValueError:
+                self._http.invalidate(JP_SETS_URL)  # メンテナンス画面等を保存し続けない
+                raise
+        return self._jp_releases[1]
+
+    def _rank_for_matching(
+        self, en_ref: CardRef, prints: tuple[PrintEntry, ...]
+    ) -> list[PrintEntry]:
+        """照合で日本語ページを取りに行く順。候補が 2 件以上のときだけ発売日の表を引く。"""
+        if len(prints) < 2:
+            return list(prints)
+        en_set = find_set(en_ref.set_code)
+        if en_set is None or not en_set.release_date:
+            return rank_candidates(prints)
+        try:
+            releases = self.jp_release_dates()
+        except Exception as exc:  # 一覧が取れなくても照合は従来の順で続ける
+            log.warning("日本語セット一覧の取得に失敗（候補は従来の順で試す）: %s", exc)
+            return rank_candidates(prints)
+        ranked = rank_candidates(prints, en_set.release_date, releases)
+        log.info(
+            "日本語候補 %d 件を %s（%s）の発売日に近い順に: %s",
+            len(ranked),
+            en_ref.set_code,
+            en_set.release_date,
+            [f"{e.ref.set_code}/{e.ref.number}" for e in ranked[:6]],
+        )
+        return ranked
 
     def get_japanese_card(self, ref: CardRef, fetch_page: bool = True) -> JapaneseCard:
         """日本語カード情報を返す。`fetch_page=False` ならページを取得せず URL だけ組み立てる。"""
@@ -147,6 +216,14 @@ class CardRepository:
         """
         name = normalize_search_text(name)
         refs = self._search(build_search_query(name, hp, None))
+        if not refs:
+            # 名前に "ex" 等が続けて読まれていると 0 件になる。外した名前で引き直す
+            for variant in name_variants(name)[1:]:
+                refs = self._search(build_search_query(variant, hp, None))
+                if refs:
+                    log.info("名前 %r では 0 件。%r で検索して %d 件", name, variant, len(refs))
+                    name = variant
+                    break
         terms = [normalize_search_text(t) for t in text_terms or []]
         if len(refs) <= 1:
             return refs
@@ -179,9 +256,8 @@ class CardRepository:
         3. 同一絵柄が無ければ別イラスト候補として返し、自動確定しない。
         """
         en_page = self.get_card_page(en_ref)
-        entries = rank_candidates(en_page.jp_prints)
 
-        if not entries:
+        if not en_page.jp_prints:
             return MatchResult(
                 en=en_page,
                 best=None,
@@ -193,6 +269,7 @@ class CardRepository:
         if use_saved and self._mapping is not None:
             saved = self._mapping.get(en_ref)
             if saved is not None:
+                entries = rank_candidates(en_page.jp_prints)
                 try:
                     card = self.get_japanese_card(saved.jp)
                 except (
@@ -215,6 +292,7 @@ class CardRepository:
                     source="cache" if saved.source == "auto" else "manual",
                 )
 
+        entries = self._rank_for_matching(en_ref, en_page.jp_prints)
         en_artist = _normalize_artist(en_page.illustrator)
         fetched: dict[CardRef, JapaneseCard] = {}
         best: JapaneseCard | None = None
